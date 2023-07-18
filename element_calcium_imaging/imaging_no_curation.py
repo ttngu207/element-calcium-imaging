@@ -1347,6 +1347,34 @@ class Fluorescence(dj.Computed):
         else:
             raise NotImplementedError("Unknown/unimplemented method: {}".format(method))
 
+@schema
+class CannabinoidAnalysis(dj.Computed):
+    definition = """
+    -> Segmentation
+    -> scan.Channel.proj(ecb_channel='channel')
+    """
+
+    def make(self, key):
+        import nd2
+        from suite2p.registration import rigid
+
+
+        x_off, y_off = (MotionCorrection.RigidMotionCorrection & key).fetch1("x_shifts", "y_shifts")
+        image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+        image_files = [
+            find_full_path(get_imaging_root_data_dir(), image_file)
+            for image_file in image_files
+        ]
+        full_image = nd2.imread(image_files[0])    # Only load the first image in the image files directory. Assumes 1 .nd2 per directory.
+        channel_two = full_image[:, 1, :, :]
+        corrected_image = np.zeros((channel_two.shape))
+        for frame in range(channel_two.shape[0]):
+            corrected_image[frame, :, :] = np.roll(channel_two[frame, :, :], (-y_off[frame], -x_off[frame]), axis=(0, 1))
+        mask_id, x_mask, y_mask = (Segmentation.Mask & key).fetch("mask", "mask_xpix", "mask_ypix")
+        traces = np.zeros((x_mask.shape[0], corrected_image.shape[0]))
+        for mask in range(x_mask.shape[0]):
+            traces[mask, :] = corrected_image[:, y_mask[mask], x_mask[mask]].mean(axis=1)
+
 
 @schema
 class ActivityExtractionMethod(dj.Lookup):
