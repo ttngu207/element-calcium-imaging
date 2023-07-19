@@ -346,11 +346,11 @@ class ZDriftMetrics(dj.Computed):
 
     Attributes:
         ProcessingTask (foreign key): Primary key from ProcessingTask.
-        ZCorrelationParamSet (foreign key): Primary key from ZCorrelationParamSet
+        ZDriftParamSet (foreign key): Primary key from ZDriftParamSet
     """
 
     definition = """
-    -> ZCorrelationParamSet
+    -> ZDriftParamSet
     ---
     z_drift: longblob
     """
