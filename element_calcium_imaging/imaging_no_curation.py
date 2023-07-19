@@ -355,7 +355,7 @@ class ZDriftMetrics(dj.Computed):
 
     @classmethod
     def key_source(self):
-        return scan.ScanInfo
+        return scan.ScanInfo & ZDriftParamSet
 
     def make(self, key):
         import nd2
