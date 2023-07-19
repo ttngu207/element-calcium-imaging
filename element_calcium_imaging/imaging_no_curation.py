@@ -286,60 +286,160 @@ class ProcessingTask(dj.Manual):
 
         return output_dir.relative_to(processed_dir) if relative else output_dir
 
+
+@schema
+class ZDriftParamSet(dj.Manual):
+    definition = """
+    paramset_idx: int
+    ---
+    paramset_desc: varchar(1280)  # Parameter-set description
+    param_set_hash: uuid  # A universally unique identifier for the parameter set
+    unique index (param_set_hash)
+    params: longblob  # Parameter Set, a dictionary of all applicable parameters
+    to the z-axis correlation analysis.
+    """
+
     @classmethod
-    def generate(cls, scan_key, paramset_idx=0):
-        """Generate a ProcessingTask for a Scan using an parameter ProcessingParamSet
+    def insert_new_params(
+        cls,
+        processing_method: str,
+        paramset_idx: int,
+        paramset_desc: str,
+        params: dict,
+    ):
+        """Insert a parameter set into ProcessingParamSet table.
 
-        Generate an entry in the ProcessingTask table for a particular scan using an
-        existing parameter set from the ProcessingParamSet table.
+        This function automates the parameter set hashing and avoids insertion of an
+            existing parameter set.
 
-        Args:
-            scan_key (dict): Primary key from Scan table.
+        Attributes:
+            processing_method (str): Processing method/package used for processing of
+                calcium imaging.
             paramset_idx (int): Unique parameter set ID.
+            paramset_desc (str): Parameter set description.
+            params (dict): Parameter Set, all applicable parameters to the
+            z-axis correlation analysis.
         """
-        key = {**scan_key, "paramset_idx": paramset_idx}
+        param_dict = {
+            "processing_method": processing_method,
+            "paramset_idx": paramset_idx,
+            "paramset_desc": paramset_desc,
+            "params": params,
+            "param_set_hash": dict_to_uuid(params),
+        }
+        q_param = cls & {"param_set_hash": param_dict["param_set_hash"]}
 
-        processed_dir = get_processed_root_data_dir()
-        output_dir = cls.infer_output_dir(key, relative=False, mkdir=True)
-
-        method = (ProcessingParamSet & {"paramset_idx": paramset_idx}).fetch1(
-            "processing_method"
-        )
-
-        try:
-            if method == "suite2p":
-                from element_interface import suite2p_loader
-
-                suite2p_loader.Suite2p(output_dir)
-            elif method == "caiman":
-                from element_interface import caiman_loader
-
-                caiman_loader.CaImAn(output_dir)
-            elif method == "extract":
-                from element_interface import extract_loader
-
-                extract_loader.EXTRACT(output_dir)
-
-            else:
-                raise NotImplementedError(
-                    "Unknown/unimplemented method: {}".format(method)
+        if q_param:  # If the specified param-set already exists
+            p_name = q_param.fetch1("paramset_idx")
+            if p_name == paramset_idx:  # If the existed set has the same name: job done
+                return
+            else:  # If not same name: human error, trying to add the same paramset with different name
+                raise dj.DataJointError(
+                    "The specified param-set already exists - name: {}".format(p_name)
                 )
-        except FileNotFoundError:
-            task_mode = "trigger"
         else:
-            task_mode = "load"
+            cls.insert1(param_dict)
 
-        cls.insert1(
-            {
-                **key,
-                "processing_output_dir": output_dir.relative_to(
-                    processed_dir
-                ).as_posix(),
-                "task_mode": task_mode,
-            }
+
+@schema
+class ZDriftMetrics(dj.Computed):
+    """Generate z-axis motion report and drop frames with high motion.
+
+    Attributes:
+        ProcessingTask (foreign key): Primary key from ProcessingTask.
+        ZCorrelationParamSet (foreign key): Primary key from ZCorrelationParamSet
+    """
+
+    definition = """
+    -> ZCorrelationParamSet
+    ---
+    z_drift: longblob
+    """
+
+    @classmethod
+    def key_source(self):
+        return scan.ScanInfo
+
+    def make(self, key):
+        import nd2
+        from scipy import signal
+
+        def _make_taper(size, width):
+            m = np.ones(size - width + 1)
+            k = np.hanning(width)
+            return np.convolve(m, k, mode="full") / k.sum()
+
+        drift_params = (ZDriftParamSet & key).fetch1("params")
+
+        image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+        image_files = [
+            find_full_path(get_imaging_root_data_dir(), image_file)
+            for image_file in image_files
+        ]
+
+        zstack_files = list(get_imaging_root_data_dir().rglob("/zstack/*"))
+
+        ca_imaging_movie = nd2.imread(image_files[0])
+        zstack = nd2.imread(zstack_files[0])
+        ca_imaging_movie = ca_imaging_movie[:, 0, :, :]
+        zstack = zstack[:, 0, :, :]
+
+        # center zstack
+        zstack = zstack - zstack.mean(axis=(1, 2), keepdims=True)
+
+        # taper zstack
+        ytaper = _make_taper(zstack.shape[1], drift_params["width"])
+        zstack = zstack * ytaper[None, :, None]
+
+        xtaper = _make_taper(zstack.shape[2], drift_params["width"])
+        zstack = zstack * xtaper[None, None, :]
+
+        # normalize zstack
+        zstack = zstack - zstack.mean(axis=(1, 2), keepdims=True)
+        zstack /= np.sqrt((zstack**2).sum(axis=(1, 2), keepdims=True))
+
+        # pad zstack
+        zstack = np.pad(
+            zstack,
+            (
+                (0, 0),
+                (drift_params["width"], drift_params["width"]),
+                (drift_params["width"], drift_params["width"]),
+            ),
         )
 
-    auto_generate_entries = generate
+        # normalize movie
+        ca_imaging_movie = ca_imaging_movie - ca_imaging_movie.mean(
+            axis=(1, 2), keepdims=True
+        )
+        ca_imaging_movie /= np.sqrt(
+            (ca_imaging_movie**2).sum(axis=(1, 2), keepdims=True)
+        )
+
+        # Vectorized implementation
+        middle = (zstack.shape[0] - 1) // 2
+        _, ny, nx = ca_imaging_movie.shape
+        offsets = list(
+            (dy, dx)
+            for dx in range(2 * drift_params["width"] + 1)
+            for dy in range(2 * drift_params["width"] + 1)
+        )
+        c = list(
+            np.einsum(
+                "dij, tij -> td",
+                zstack[:, dy : dy + ny, dx : dx + nx],
+                ca_imaging_movie,
+            )
+            for dy, dx in offsets
+        )
+
+        drift = ((np.argmax(np.stack(c).max(axis=0), axis=1)) - middle) * drift_params[
+            "slice_interval"
+        ]
+
+        self.insert1(
+            dict(key, z_drift=drift),
+        )
 
 
 @schema
@@ -404,7 +504,6 @@ class Processing(dj.Computed):
             else:
                 raise NotImplementedError("Unknown method: {}".format(method))
         elif task_mode == "trigger":
-
             method = (ProcessingParamSet * ProcessingTask & key).fetch1(
                 "processing_method"
             )
@@ -1346,34 +1445,6 @@ class Fluorescence(dj.Computed):
 
         else:
             raise NotImplementedError("Unknown/unimplemented method: {}".format(method))
-
-@schema
-class CannabinoidAnalysis(dj.Computed):
-    definition = """
-    -> Segmentation
-    -> scan.Channel.proj(ecb_channel='channel')
-    """
-
-    def make(self, key):
-        import nd2
-        from suite2p.registration import rigid
-
-
-        x_off, y_off = (MotionCorrection.RigidMotionCorrection & key).fetch1("x_shifts", "y_shifts")
-        image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
-        image_files = [
-            find_full_path(get_imaging_root_data_dir(), image_file)
-            for image_file in image_files
-        ]
-        full_image = nd2.imread(image_files[0])    # Only load the first image in the image files directory. Assumes 1 .nd2 per directory.
-        channel_two = full_image[:, 1, :, :]
-        corrected_image = np.zeros((channel_two.shape))
-        for frame in range(channel_two.shape[0]):
-            corrected_image[frame, :, :] = np.roll(channel_two[frame, :, :], (-y_off[frame], -x_off[frame]), axis=(0, 1))
-        mask_id, x_mask, y_mask = (Segmentation.Mask & key).fetch("mask", "mask_xpix", "mask_ypix")
-        traces = np.zeros((x_mask.shape[0], corrected_image.shape[0]))
-        for mask in range(x_mask.shape[0]):
-            traces[mask, :] = corrected_image[:, y_mask[mask], x_mask[mask]].mean(axis=1)
 
 
 @schema
