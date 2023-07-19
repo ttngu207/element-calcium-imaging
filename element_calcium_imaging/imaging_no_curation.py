@@ -348,6 +348,7 @@ class ZDriftMetrics(dj.Computed):
     """
 
     definition = """
+    -> scan.Scan
     -> ZDriftParamSet
     ---
     z_drift: longblob
