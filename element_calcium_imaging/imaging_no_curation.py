@@ -301,7 +301,6 @@ class ZDriftParamSet(dj.Manual):
     @classmethod
     def insert_new_params(
         cls,
-        processing_method: str,
         paramset_idx: int,
         paramset_desc: str,
         params: dict,
@@ -320,7 +319,6 @@ class ZDriftParamSet(dj.Manual):
             z-axis correlation analysis.
         """
         param_dict = {
-            "processing_method": processing_method,
             "paramset_idx": paramset_idx,
             "paramset_desc": paramset_desc,
             "params": params,
