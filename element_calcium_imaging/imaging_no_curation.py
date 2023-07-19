@@ -353,7 +353,7 @@ class ZDriftMetrics(dj.Computed):
     z_drift: longblob
     """
 
-    @classmethod
+    @property
     def key_source(self):
         return scan.ScanInfo & ZDriftParamSet
 
