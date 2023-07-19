@@ -295,8 +295,7 @@ class ZDriftParamSet(dj.Manual):
     paramset_desc: varchar(1280)  # Parameter-set description
     param_set_hash: uuid  # A universally unique identifier for the parameter set
     unique index (param_set_hash)
-    params: longblob  # Parameter Set, a dictionary of all applicable parameters
-    to the z-axis correlation analysis.
+    params: longblob  # Parameter Set, a dictionary of all z-drift parameters.
     """
 
     @classmethod
