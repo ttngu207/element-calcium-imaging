@@ -355,10 +355,6 @@ class ZDriftMetrics(dj.Computed):
     z_drift: longblob
     """
 
-    @property
-    def key_source(self):
-        return scan.ScanInfo & ZDriftParamSet
-
     def make(self, key):
         import nd2
 
@@ -441,7 +437,7 @@ class ZDriftMetrics(dj.Computed):
         ]
 
         self.insert1(
-            dict(key, z_drift=drift),
+            dict(**key, z_drift=drift),
         )
 
 
