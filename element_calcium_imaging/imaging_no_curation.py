@@ -15,6 +15,7 @@ from .scan import (
     get_processed_root_data_dir,
     get_scan_box_files,
     get_scan_image_files,
+    get_zstack_files,
 )
 
 schema = dj.Schema()
@@ -360,7 +361,6 @@ class ZDriftMetrics(dj.Computed):
 
     def make(self, key):
         import nd2
-        from scipy import signal
 
         def _make_taper(size, width):
             m = np.ones(size - width + 1)
@@ -369,13 +369,18 @@ class ZDriftMetrics(dj.Computed):
 
         drift_params = (ZDriftParamSet & key).fetch1("params")
 
+        if not "pad_length" in drift_params:
+            raise Exception("Z-drift parameters must include a key 'pad_length'.")
+        if not "slice_interval" in drift_params:
+            raise Exception("Z-drift parameters must include a key 'slice_interval'.")
+
         image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
         image_files = [
             find_full_path(get_imaging_root_data_dir(), image_file)
             for image_file in image_files
         ]
 
-        zstack_files = list(get_imaging_root_data_dir().rglob("/zstack/*"))
+        zstack_files = get_zstack_files(key)
 
         ca_imaging_movie = nd2.imread(image_files[0])
         zstack = nd2.imread(zstack_files[0])
@@ -386,10 +391,10 @@ class ZDriftMetrics(dj.Computed):
         zstack = zstack - zstack.mean(axis=(1, 2), keepdims=True)
 
         # taper zstack
-        ytaper = _make_taper(zstack.shape[1], drift_params["width"])
+        ytaper = _make_taper(zstack.shape[1], drift_params["pad_length"])
         zstack = zstack * ytaper[None, :, None]
 
-        xtaper = _make_taper(zstack.shape[2], drift_params["width"])
+        xtaper = _make_taper(zstack.shape[2], drift_params["pad_length"])
         zstack = zstack * xtaper[None, None, :]
 
         # normalize zstack
@@ -401,8 +406,8 @@ class ZDriftMetrics(dj.Computed):
             zstack,
             (
                 (0, 0),
-                (drift_params["width"], drift_params["width"]),
-                (drift_params["width"], drift_params["width"]),
+                (drift_params["pad_length"], drift_params["pad_length"]),
+                (drift_params["pad_length"], drift_params["pad_length"]),
             ),
         )
 
@@ -419,8 +424,8 @@ class ZDriftMetrics(dj.Computed):
         _, ny, nx = ca_imaging_movie.shape
         offsets = list(
             (dy, dx)
-            for dx in range(2 * drift_params["width"] + 1)
-            for dy in range(2 * drift_params["width"] + 1)
+            for dx in range(2 * drift_params["pad_length"] + 1)
+            for dy in range(2 * drift_params["pad_length"] + 1)
         )
         c = list(
             np.einsum(
