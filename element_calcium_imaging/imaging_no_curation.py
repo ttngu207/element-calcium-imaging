@@ -376,7 +376,7 @@ class ZDriftMetrics(dj.Computed):
 
         image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
         image_files = [
-            find_full_path(get_imaging_root_data_dir(), image_file)
+            find_full_path(get_imaging_root_data_dir()[0], image_file)
             for image_file in image_files
         ]
 
