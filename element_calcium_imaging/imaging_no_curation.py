@@ -1,18 +1,21 @@
+import importlib
 import inspect
 import pathlib
-import importlib
-import numpy as np
+from collections.abc import Callable
 
 import datajoint as dj
-from element_interface.utils import find_full_path, dict_to_uuid, find_root_directory
+import numpy as np
+from element_interface.utils import dict_to_uuid, find_full_path, find_root_directory
 
-from . import scan, imaging_report
+from . import imaging_report, scan
 from .scan import (
     get_imaging_root_data_dir,
-    get_processed_root_data_dir,
-    get_scan_image_files,
-    get_scan_box_files,
     get_nd2_files,
+    get_prairieview_files,
+    get_processed_root_data_dir,
+    get_scan_box_files,
+    get_scan_image_files,
+    get_zstack_files,
 )
 
 schema = dj.Schema()
@@ -95,6 +98,7 @@ class ProcessingMethod(dj.Lookup):
     contents = [
         ("suite2p", "suite2p analysis suite"),
         ("caiman", "caiman analysis suite"),
+        ("extract", "extract analysis suite"),
     ]
 
 
@@ -107,7 +111,7 @@ class ProcessingParamSet(dj.Lookup):
     to avoid duplicated entries.
 
     Attributes:
-        paramset_idx (int): Uniqiue parameter set ID.
+        paramset_idx (int): Unique parameter set ID.
         ProcessingMethod (foreign key): A primary key from ProcessingMethod.
         paramset_desc (str): Parameter set description.
         param_set_hash (uuid): A universally unique identifier for the parameter set.
@@ -116,7 +120,7 @@ class ProcessingParamSet(dj.Lookup):
     """
 
     definition = """# Processing Parameter Set
-    paramset_idx: smallint  # Uniqiue parameter set ID.
+    paramset_idx: smallint  # Unique parameter set ID.
     ---
     -> ProcessingMethod
     paramset_desc: varchar(1280)  # Parameter-set description
@@ -127,20 +131,36 @@ class ProcessingParamSet(dj.Lookup):
 
     @classmethod
     def insert_new_params(
-        cls, processing_method: str, paramset_idx: int, paramset_desc: str, params: dict
+        cls,
+        processing_method: str,
+        paramset_idx: int,
+        paramset_desc: str,
+        params: dict,
     ):
         """Insert a parameter set into ProcessingParamSet table.
-        This function automizes the parameter set hashing and avoids insertion of an
+
+        This function automates the parameter set hashing and avoids insertion of an
             existing parameter set.
 
         Attributes:
             processing_method (str): Processing method/package used for processing of
                 calcium imaging.
-            paramset_idx (int): Uniqiue parameter set ID.
+            paramset_idx (int): Unique parameter set ID.
             paramset_desc (str): Parameter set description.
             params (dict): Parameter Set, all applicable parameters to the analysis
                 suite.
         """
+        if processing_method == "extract":
+            assert (
+                params.get("extract") is not None and params.get("suite2p") is not None
+            ), ValueError(
+                "Please provide the processing parameters in the {'suite2p': {...}, 'extract': {...}} dictionary format."
+            )
+
+            # Force Suite2p to only run motion correction.
+            params["suite2p"]["do_registration"] = True
+            params["suite2p"]["roidetect"] = False
+
         param_dict = {
             "processing_method": processing_method,
             "paramset_idx": paramset_idx,
@@ -151,12 +171,12 @@ class ProcessingParamSet(dj.Lookup):
         q_param = cls & {"param_set_hash": param_dict["param_set_hash"]}
 
         if q_param:  # If the specified param-set already exists
-            pname = q_param.fetch1("paramset_idx")
-            if pname == paramset_idx:  # If the existed set has the same name: job done
+            p_name = q_param.fetch1("paramset_idx")
+            if p_name == paramset_idx:  # If the existed set has the same name: job done
                 return
             else:  # If not same name: human error, trying to add the same paramset with different name
                 raise dj.DataJointError(
-                    "The specified param-set already exists - name: {}".format(pname)
+                    "The specified param-set already exists - name: {}".format(p_name)
                 )
         else:
             cls.insert1(param_dict)
@@ -182,7 +202,7 @@ class MaskType(dj.Lookup):
     """Available labels for segmented masks (e.g. 'soma', 'axon', 'dendrite', 'neuropil').
 
     Attributes:
-        masky_type (str): Mask type.
+        mask_type (str): Mask type.
     """
 
     definition = """# Possible types of a segmented mask
@@ -197,11 +217,13 @@ class MaskType(dj.Lookup):
 
 @schema
 class ProcessingTask(dj.Manual):
-    """This table defines a calcium imaging processing task for a combination of a
+    """A pairing of processing params and scans to be loaded or triggered
+
+    This table defines a calcium imaging processing task for a combination of a
     `Scan` and a `ProcessingParamSet` entries, including all the inputs (scan, method,
     method's parameters). The task defined here is then run in the downstream table
-    Processing. This table supports definitions of both loading of pre-generated results
-    and the triggering of new analysis for all supported analysis methods
+    `Processing`. This table supports definitions of both loading of pre-generated results
+    and the triggering of new analysis for all supported analysis methods.
 
     Attributes:
         scan.Scan (foreign key):
@@ -226,11 +248,12 @@ class ProcessingTask(dj.Manual):
         Args:
             key (dict): Primary key from the ProcessingTask table.
             relative (bool): If True, processing_output_dir is returned relative to
-                imaging_root_dir.
+                imaging_root_dir. Default False.
             mkdir (bool): If True, create the processing_output_dir directory.
+                Default True.
 
         Returns:
-            A default output directory for the processed results (processed_output_dir
+            dir (str): A default output directory for the processed results (processed_output_dir
                 in ProcessingTask) based on the following convention:
                 processed_dir / scan_dir / {processing_method}_{paramset_idx}
                 e.g.: sub4/sess1/scan0/suite2p_0
@@ -239,6 +262,7 @@ class ProcessingTask(dj.Manual):
             "NIS": get_nd2_files,
             "ScanImage": get_scan_image_files,
             "Scanbox": get_scan_box_files,
+            "PrairieView": get_prairieview_files,
         }
         image_locator = image_locators[(scan.Scan & key).fetch1("acq_software")]
 
@@ -263,50 +287,159 @@ class ProcessingTask(dj.Manual):
 
         return output_dir.relative_to(processed_dir) if relative else output_dir
 
+
+@schema
+class ZDriftParamSet(dj.Manual):
+    definition = """
+    paramset_idx: int
+    ---
+    paramset_desc: varchar(1280)  # Parameter-set description
+    param_set_hash: uuid  # A universally unique identifier for the parameter set
+    unique index (param_set_hash)
+    params: longblob  # Parameter Set, a dictionary of all z-drift parameters.
+    """
+
     @classmethod
-    def generate(cls, scan_key, paramset_idx=0):
-        """Generate a default ProcessingTask entry for a particular Scan using an
-        existing parameter set in the ProcessingParamSet table.
+    def insert_new_params(
+        cls,
+        paramset_idx: int,
+        paramset_desc: str,
+        params: dict,
+    ):
+        """Insert a parameter set into ProcessingParamSet table.
 
-        Args:
-            scan_key (dict): Primary key from Scan table.
+        This function automates the parameter set hashing and avoids insertion of an
+            existing parameter set.
+
+        Attributes:
+            processing_method (str): Processing method/package used for processing of
+                calcium imaging.
             paramset_idx (int): Unique parameter set ID.
+            paramset_desc (str): Parameter set description.
+            params (dict): Parameter Set, all applicable parameters to the
+            z-axis correlation analysis.
         """
-        key = {**scan_key, "paramset_idx": paramset_idx}
+        param_dict = {
+            "paramset_idx": paramset_idx,
+            "paramset_desc": paramset_desc,
+            "params": params,
+            "param_set_hash": dict_to_uuid(params),
+        }
+        q_param = cls & {"param_set_hash": param_dict["param_set_hash"]}
 
-        output_dir = cls.infer_output_dir(key, relative=False, mkdir=True)
-
-        method = (ProcessingParamSet & {"paramset_idx": paramset_idx}).fetch1(
-            "processing_method"
-        )
-
-        try:
-            if method == "suite2p":
-                from element_interface import suite2p_loader
-
-                suite2p_loader.Suite2p(output_dir)
-            elif method == "caiman":
-                from element_interface import caiman_loader
-
-                caiman_loader.CaImAn(output_dir)
-            else:
-                raise NotImplementedError(
-                    "Unknown/unimplemented method: {}".format(method)
+        if q_param:  # If the specified param-set already exists
+            p_name = q_param.fetch1("paramset_idx")
+            if p_name == paramset_idx:  # If the existed set has the same name: job done
+                return
+            else:  # If not same name: human error, trying to add the same paramset with different name
+                raise dj.DataJointError(
+                    "The specified param-set already exists - name: {}".format(p_name)
                 )
-        except FileNotFoundError:
-            task_mode = "trigger"
         else:
-            task_mode = "load"
+            cls.insert1(param_dict)
 
-        cls.insert1(
-            {
-                **key,
-                "processing_output_dir": output_dir,
-                "task_mode": task_mode,
-            }
+
+@schema
+class ZDriftMetrics(dj.Computed):
+    """Generate z-axis motion report and drop frames with high motion.
+
+    Attributes:
+        ProcessingTask (foreign key): Primary key from ProcessingTask.
+        ZDriftParamSet (foreign key): Primary key from ZDriftParamSet.
+        z_drift (longblob): Amount of drift in microns per frame in Z direction.
+    """
+
+    definition = """
+    -> scan.Scan
+    -> ZDriftParamSet
+    ---
+    z_drift: longblob   # Amount of drift in microns per frame in Z direction.
+    """
+
+    def make(self, key):
+        import nd2
+
+        def _make_taper(size, width):
+            m = np.ones(size - width + 1)
+            k = np.hanning(width)
+            return np.convolve(m, k, mode="full") / k.sum()
+
+        drift_params = (ZDriftParamSet & key).fetch1("params")
+
+        if not "pad_length" in drift_params:
+            raise Exception("Z-drift parameters must include a key 'pad_length'.")
+        if not "slice_interval" in drift_params:
+            raise Exception("Z-drift parameters must include a key 'slice_interval'.")
+
+        image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+        image_files = [
+            find_full_path(get_imaging_root_data_dir()[0], image_file)
+            for image_file in image_files
+        ]
+
+        zstack_files = get_zstack_files(key)
+
+        ca_imaging_movie = nd2.imread(image_files[0])
+        zstack = nd2.imread(zstack_files[0])
+        ca_imaging_movie = ca_imaging_movie[:, 0, :, :]
+        zstack = zstack[:, 0, :, :]
+
+        # center zstack
+        zstack = zstack - zstack.mean(axis=(1, 2), keepdims=True)
+
+        # taper zstack
+        ytaper = _make_taper(zstack.shape[1], drift_params["pad_length"])
+        zstack = zstack * ytaper[None, :, None]
+
+        xtaper = _make_taper(zstack.shape[2], drift_params["pad_length"])
+        zstack = zstack * xtaper[None, None, :]
+
+        # normalize zstack
+        zstack = zstack - zstack.mean(axis=(1, 2), keepdims=True)
+        zstack /= np.sqrt((zstack**2).sum(axis=(1, 2), keepdims=True))
+
+        # pad zstack
+        zstack = np.pad(
+            zstack,
+            (
+                (0, 0),
+                (drift_params["pad_length"], drift_params["pad_length"]),
+                (drift_params["pad_length"], drift_params["pad_length"]),
+            ),
         )
 
-    auto_generate_entries = generate
+        # normalize movie
+        ca_imaging_movie = ca_imaging_movie - ca_imaging_movie.mean(
+            axis=(1, 2), keepdims=True
+        )
+        ca_imaging_movie /= np.sqrt(
+            (ca_imaging_movie**2).sum(axis=(1, 2), keepdims=True)
+        )
+
+        # Vectorized implementation
+        middle = (zstack.shape[0] - 1) // 2
+        _, ny, nx = ca_imaging_movie.shape
+        offsets = list(
+            (dy, dx)
+            for dx in range(2 * drift_params["pad_length"] + 1)
+            for dy in range(2 * drift_params["pad_length"] + 1)
+        )
+        c = list(
+            np.einsum(
+                "dij, tij -> td",
+                zstack[:, dy : dy + ny, dx : dx + nx],
+                ca_imaging_movie,
+            )
+            for dy, dx in offsets
+        )
+
+        drift = ((np.argmax(np.stack(c).max(axis=0), axis=1)) - middle) * drift_params[
+            "slice_interval"
+        ]
+
+        self.insert1(
+            dict(**key, z_drift=drift),
+        )
 
 
 @schema
@@ -343,31 +476,34 @@ class Processing(dj.Computed):
             "task_mode", "processing_output_dir"
         )
 
-        output_dir = find_full_path(get_imaging_root_data_dir(), output_dir).as_posix()
         if not output_dir:
             output_dir = ProcessingTask.infer_output_dir(key, relative=True, mkdir=True)
             # update processing_output_dir
             ProcessingTask.update1(
                 {**key, "processing_output_dir": output_dir.as_posix()}
             )
+        output_dir = find_full_path(get_imaging_root_data_dir(), output_dir).as_posix()
 
         if task_mode == "load":
             method, imaging_dataset = get_loader_result(key, ProcessingTask)
             if method == "suite2p":
                 if (scan.ScanInfo & key).fetch1("nrois") > 0:
                     raise NotImplementedError(
-                        f"Suite2p ingestion error - Unable to handle"
-                        f" ScanImage multi-ROI scanning mode yet"
+                        "Suite2p ingestion error - Unable to handle"
+                        + " ScanImage multi-ROI scanning mode yet"
                     )
                 suite2p_dataset = imaging_dataset
                 key = {**key, "processing_time": suite2p_dataset.creation_time}
             elif method == "caiman":
                 caiman_dataset = imaging_dataset
                 key = {**key, "processing_time": caiman_dataset.creation_time}
+            elif method == "extract":
+                raise NotImplementedError(
+                    "To use EXTRACT with this DataJoint Element please set `task_mode=trigger`"
+                )
             else:
                 raise NotImplementedError("Unknown method: {}".format(method))
         elif task_mode == "trigger":
-
             method = (ProcessingParamSet * ProcessingTask & key).fetch1(
                 "processing_method"
             )
@@ -406,18 +542,32 @@ class Processing(dj.Computed):
                 key = {**key, "processing_time": suite2p_dataset.creation_time}
 
             elif method == "caiman":
+                from element_interface.caiman_loader import _process_scanimage_tiff
                 from element_interface.run_caiman import run_caiman
 
                 caiman_params = (ProcessingTask * ProcessingParamSet & key).fetch1(
                     "params"
                 )
-                sampling_rate, ndepths = (scan.ScanInfo & key).fetch1("fps", "ndepths")
+                sampling_rate, ndepths, nchannels = (scan.ScanInfo & key).fetch1(
+                    "fps", "ndepths", "nchannels"
+                )
 
                 is3D = bool(ndepths > 1)
                 if is3D:
                     raise NotImplementedError(
                         "Caiman pipeline is not yet capable of analyzing 3D scans."
                     )
+
+                # handle multi-channel tiff image before running CaImAn
+                if nchannels > 1:
+                    channel_idx = caiman_params.get("channel_to_process", 0)
+                    tmp_dir = pathlib.Path(output_dir) / "channel_separated_tif"
+                    tmp_dir.mkdir(exist_ok=True)
+                    _process_scanimage_tiff(
+                        [f.as_posix() for f in image_files], output_dir=tmp_dir
+                    )
+                    image_files = tmp_dir.glob(f"*_chn{channel_idx}.tif")
+
                 run_caiman(
                     file_paths=[f.as_posix() for f in image_files],
                     parameters=caiman_params,
@@ -429,6 +579,57 @@ class Processing(dj.Computed):
                 _, imaging_dataset = get_loader_result(key, ProcessingTask)
                 caiman_dataset = imaging_dataset
                 key["processing_time"] = caiman_dataset.creation_time
+
+            elif method == "extract":
+                import suite2p
+                from element_interface.extract_trigger import EXTRACT_trigger
+                from scipy.io import savemat
+
+                # Motion Correction with Suite2p
+                params = (ProcessingTask * ProcessingParamSet & key).fetch1("params")
+
+                params["suite2p"]["save_path0"] = output_dir
+                (
+                    params["suite2p"]["fs"],
+                    params["suite2p"]["nplanes"],
+                    params["suite2p"]["nchannels"],
+                ) = (scan.ScanInfo & key).fetch1("fps", "ndepths", "nchannels")
+
+                input_format = pathlib.Path(image_files[0]).suffix
+                params["suite2p"]["input_format"] = input_format[1:]
+
+                suite2p_paths = {
+                    "data_path": [image_files[0].parent.as_posix()],
+                    "tiff_list": [f.as_posix() for f in image_files],
+                }
+
+                suite2p.run_s2p(ops=params["suite2p"], db=suite2p_paths)
+
+                # Convert data.bin to registered_scans.mat
+                scanfile_fullpath = pathlib.Path(output_dir) / "suite2p/plane0/data.bin"
+
+                data_shape = (scan.ScanInfo * scan.ScanInfo.Field & key).fetch1(
+                    "nframes", "px_height", "px_width"
+                )
+                data = np.memmap(scanfile_fullpath, shape=data_shape, dtype=np.int16)
+
+                scan_matlab_fullpath = scanfile_fullpath.parent / "registered_scan.mat"
+
+                # Save the motion corrected movie (data.bin) in a .mat file
+                savemat(
+                    scan_matlab_fullpath,
+                    {"M": np.transpose(data, axes=[1, 2, 0])},
+                )
+
+                # Execute EXTRACT
+
+                ex = EXTRACT_trigger(
+                    scan_matlab_fullpath, params["extract"], output_dir
+                )
+                ex.run()
+
+                _, extract_dataset = get_loader_result(key, ProcessingTask)
+                key["processing_time"] = extract_dataset.creation_time
 
         else:
             raise ValueError(f"Unknown task mode: {task_mode}")
@@ -477,7 +678,7 @@ class MotionCorrection(dj.Imported):
         outlier_frames=null : longblob  # mask with true for frames with outlier shifts (already corrected)
         y_shifts            : longblob  # (pixels) y motion correction shifts
         x_shifts            : longblob  # (pixels) x motion correction shifts
-        z_shifts=null       : longblob  # (pixels) z motion correction shifts (z-drift) 
+        z_shifts=null       : longblob  # (pixels) z motion correction shifts (z-drift)
         y_std               : float     # (pixels) standard deviation of y shifts across all frames
         x_std               : float     # (pixels) standard deviation of x shifts across all frames
         z_std=null          : float     # (pixels) standard deviation of z shifts across all frames
@@ -523,11 +724,11 @@ class MotionCorrection(dj.Imported):
             block_z (longblob): z_start and z_end in pixels for this block
             y_shifts (longblob): y motion correction shifts for every frame in pixels
             x_shifts (longblob): x motion correction shifts for every frame in pixels
-            z_shifts (longblob, optional): x motion correction shifts for every frame
+            z_shift=null (longblob, optional): x motion correction shifts for every frame
                 in pixels
             y_std (float): standard deviation of y shifts across all frames in pixels
             x_std (float): standard deviation of x shifts across all frames in pixels
-            z_std (float, optional): standard deviation of z shifts across all frames
+            z_std=null (float, optional): standard deviation of z shifts across all frames
                 in pixels
         """
 
@@ -629,7 +830,8 @@ class MotionCorrection(dj.Imported):
                         }
                     else:
                         nonrigid_correction["outlier_frames"] = np.logical_or(
-                            nonrigid_correction["outlier_frames"], s2p.ops["badframes"]
+                            nonrigid_correction["outlier_frames"],
+                            s2p.ops["badframes"],
                         )
                     for b_id, (b_y, b_x, bshift_y, bshift_x) in enumerate(
                         zip(
@@ -662,7 +864,11 @@ class MotionCorrection(dj.Imported):
                                 "y_shifts": bshift_y,
                                 "x_shifts": bshift_x,
                                 "z_shifts": np.full(
-                                    (len(suite2p_dataset.planes), len(bshift_x)), 0
+                                    (
+                                        len(suite2p_dataset.planes),
+                                        len(bshift_x),
+                                    ),
+                                    0,
                                 ),
                                 "y_std": np.nanstd(bshift_y),
                                 "x_std": np.nanstd(bshift_x),
@@ -694,7 +900,10 @@ class MotionCorrection(dj.Imported):
             caiman_dataset = imaging_dataset
 
             self.insert1(
-                {**key, "motion_correct_channel": caiman_dataset.alignment_channel}
+                {
+                    **key,
+                    "motion_correct_channel": caiman_dataset.alignment_channel,
+                }
             )
 
             is3D = caiman_dataset.params.motion["is3D"]
@@ -708,7 +917,8 @@ class MotionCorrection(dj.Imported):
                         caiman_dataset.motion_correction["shifts_rig"][:, 2]
                         if is3D
                         else np.full_like(
-                            caiman_dataset.motion_correction["shifts_rig"][:, 0], 0
+                            caiman_dataset.motion_correction["shifts_rig"][:, 0],
+                            0,
                         )
                     ),
                     "x_std": np.nanstd(
@@ -927,8 +1137,8 @@ class Segmentation(dj.Computed):
         mask_center_y   : int       # center y coordinate in pixel
         mask_center_z   : int       # center z coordinate in pixel
         mask_xpix       : longblob  # x coordinates in pixels
-        mask_ypix       : longblob  # y coordinates in pixels      
-        mask_zpix       : longblob  # z coordinates in pixels        
+        mask_ypix       : longblob  # y coordinates in pixels
+        mask_zpix       : longblob  # z coordinates in pixels
         mask_weights    : longblob  # weights of the mask at the indices above
         """
 
@@ -959,7 +1169,8 @@ class Segmentation(dj.Computed):
                             "mask_xpix": mask_stat["xpix"],
                             "mask_ypix": mask_stat["ypix"],
                             "mask_zpix": np.full(
-                                mask_stat["npix"], mask_stat.get("iplane", plane)
+                                mask_stat["npix"],
+                                mask_stat.get("iplane", plane),
                             ),
                             "mask_weights": mask_stat["lam"],
                         }
@@ -980,7 +1191,10 @@ class Segmentation(dj.Computed):
 
             if cells:
                 MaskClassification.insert1(
-                    {**key, "mask_classification_method": "suite2p_default_classifier"},
+                    {
+                        **key,
+                        "mask_classification_method": "suite2p_default_classifier",
+                    },
                     allow_direct_insert=True,
                 )
                 MaskClassification.MaskType.insert(
@@ -1028,12 +1242,36 @@ class Segmentation(dj.Computed):
 
             if cells:
                 MaskClassification.insert1(
-                    {**key, "mask_classification_method": "caiman_default_classifier"},
+                    {
+                        **key,
+                        "mask_classification_method": "caiman_default_classifier",
+                    },
                     allow_direct_insert=True,
                 )
                 MaskClassification.MaskType.insert(
                     cells, ignore_extra_fields=True, allow_direct_insert=True
                 )
+        elif method == "extract":
+            extract_dataset = imaging_dataset
+            masks = [
+                dict(
+                    **key,
+                    segmentation_channel=0,
+                    mask=mask["mask_id"],
+                    mask_npix=mask["mask_npix"],
+                    mask_center_x=mask["mask_center_x"],
+                    mask_center_y=mask["mask_center_y"],
+                    mask_center_z=mask["mask_center_z"],
+                    mask_xpix=mask["mask_xpix"],
+                    mask_ypix=mask["mask_ypix"],
+                    mask_zpix=mask["mask_zpix"],
+                    mask_weights=mask["mask_weights"],
+                )
+                for mask in extract_dataset.load_results()
+            ]
+
+            self.insert1(key)
+            self.Mask.insert(masks, ignore_extra_fields=True)
         else:
             raise NotImplementedError(f"Unknown/unimplemented method: {method}")
 
@@ -1186,6 +1424,21 @@ class Fluorescence(dj.Computed):
                         "fluorescence": mask["inferred_trace"],
                     }
                 )
+
+            self.insert1(key)
+            self.Trace.insert(fluo_traces)
+        elif method == "extract":
+            extract_dataset = imaging_dataset
+
+            fluo_traces = [
+                {
+                    **key,
+                    "mask": mask_id,
+                    "fluo_channel": 0,
+                    "fluorescence": fluorescence,
+                }
+                for mask_id, fluorescence in enumerate(extract_dataset.T)
+            ]
 
             self.insert1(key)
             self.Trace.insert(fluo_traces)
@@ -1495,7 +1748,7 @@ _table_attribute_mapper = {
 }
 
 
-def get_loader_result(key: dict, table: dj.Table):
+def get_loader_result(key: dict, table: dj.Table) -> Callable:
     """Retrieve the processed imaging results from a suite2p or caiman loader.
 
     Args:
@@ -1517,7 +1770,9 @@ def get_loader_result(key: dict, table: dj.Table):
 
     output_path = find_full_path(get_imaging_root_data_dir(), output_dir)
 
-    if method == "suite2p":
+    if method == "suite2p" or (
+        method == "extract" and table.__name__ == "MotionCorrection"
+    ):
         from element_interface import suite2p_loader
 
         loaded_dataset = suite2p_loader.Suite2p(output_path)
@@ -1525,6 +1780,10 @@ def get_loader_result(key: dict, table: dj.Table):
         from element_interface import caiman_loader
 
         loaded_dataset = caiman_loader.CaImAn(output_path)
+    elif method == "extract":
+        from element_interface import extract_loader
+
+        loaded_dataset = extract_loader.EXTRACT(output_path)
     else:
         raise NotImplementedError("Unknown/unimplemented method: {}".format(method))
 

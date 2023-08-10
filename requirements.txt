@@ -1,2 +1,4 @@
 datajoint>=0.13.0
+element-interface>=0.5.1
 plotly
+ipywidgets

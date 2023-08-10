@@ -1,19 +1,56 @@
 # Changelog
 
-Observes [Semantic Versioning](https://semver.org/spec/v2.0.0.html) standard and [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) convention.
+Observes [Semantic Versioning](https://semver.org/spec/v2.0.0.html) standard and
+[Keep a Changelog](https://keepachangelog.com/en/1.0.0/) convention.
+
+## [0.5.6] - 2023-04-28
+
++ Fix - `.ipynb` output in tutorials is not visible in dark mode.
++ Fix - typos in docstrings.
+
+## [0.5.5] - 2023-04-06
+
++ Update - Bump `element-interface` requirement to `0.5.1`.
+
+## [0.5.4] - 2023-03-08
+
++ Add - Requirement for `ipywidgets`
++ Update - Docker Compose file for docs release
+
+## [0.5.3] - 2023-02-23
+
++ Add - spelling, markdown, and pre-commit config files
++ Add - Notebook rendering to docs
+
+## [0.5.2] - 2023-01-11
+
++ Bugfix - fix errors in ingesting single-plane PrairieView scans into `ScanInfo`
++ Add - Optional installation of caiman and suite2p through pip
+
+## [0.5.1] - 2022-12-15
+
++ Add - Imports for prairieview loader
+
+## [0.5.0] - 2022-12-14
+
++ Add - Cell extraction with EXTRACT package
 
 ## [0.4.2] - 2022-11-02
+
 + Bugfix - Add plotting package to the requirements to generate the figures
 + Add - Scan date parser from nd2 files
 
 ## [0.4.1] - 2022-10-28
+
 + Update - Bump version to trigger PyPI release to revert updates from incorrect tag
 
 ## [0.4.0] - 2022-10-28
+
 + Add - New schema `imaging_report` to compute and store figures from results
 + Add - Widget to display figures
 
 ## [0.3.0] - 2022-10-07
+
 + Add - Reader for `Bruker PrairieView` acquisition system
 
 ## [0.2.2] - 2022-09-28
@@ -56,6 +93,13 @@ Observes [Semantic Versioning](https://semver.org/spec/v2.0.0.html) standard and
 + Add - `scan` and `imaging` modules
 + Add - Readers for `ScanImage`, `ScanBox`, `Suite2p`, `CaImAn`
 
+[0.5.6]: https://github.com/datajoint/element-calcium-imaging/releases/tag/0.5.6
+[0.5.5]: https://github.com/datajoint/element-calcium-imaging/releases/tag/0.5.5
+[0.5.4]: https://github.com/datajoint/element-calcium-imaging/releases/tag/0.5.4
+[0.5.3]: https://github.com/datajoint/element-calcium-imaging/releases/tag/0.5.3
+[0.5.2]: https://github.com/datajoint/element-calcium-imaging/releases/tag/0.5.2
+[0.5.1]: https://github.com/datajoint/element-calcium-imaging/releases/tag/0.5.1
+[0.5.0]: https://github.com/datajoint/element-calcium-imaging/releases/tag/0.5.0
 [0.4.2]: https://github.com/datajoint/element-calcium-imaging/releases/tag/0.4.2
 [0.4.1]: https://github.com/datajoint/element-calcium-imaging/releases/tag/0.4.1
 [0.4.0]: https://github.com/datajoint/element-calcium-imaging/releases/tag/0.4.0
