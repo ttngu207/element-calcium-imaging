@@ -345,14 +345,15 @@ class ZDriftMetrics(dj.Computed):
 
     Attributes:
         ProcessingTask (foreign key): Primary key from ProcessingTask.
-        ZDriftParamSet (foreign key): Primary key from ZDriftParamSet
+        ZDriftParamSet (foreign key): Primary key from ZDriftParamSet.
+        z_drift (longblob): Amount of drift in microns per frame in Z direction.
     """
 
     definition = """
     -> scan.Scan
     -> ZDriftParamSet
     ---
-    z_drift: longblob
+    z_drift: longblob   # Amount of drift in microns per frame in Z direction.
     """
 
     def make(self, key):
