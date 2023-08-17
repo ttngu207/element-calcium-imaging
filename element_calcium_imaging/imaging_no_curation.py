@@ -378,7 +378,7 @@ class ZDriftMetrics(dj.Computed):
         zstack = nd2.imread(zstack_files[0])
 
         if not all(
-            parameter in drift_params.keys()
+            parameter in drift_params
             for parameter in [
                 "pad_length",
                 "slice_interval",
