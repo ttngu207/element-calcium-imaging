@@ -357,20 +357,13 @@ class ZDriftMetrics(dj.Computed):
     """
 
     def make(self, key):
-        import nd2
-
         def _make_taper(size, width):
             m = np.ones(size - width + 1)
             k = np.hanning(width)
             return np.convolve(m, k, mode="full") / k.sum()
 
+        nchannels = (scan.ScanInfo & key).fetch1("nchannels")
         drift_params = (ZDriftParamSet & key).fetch1("params")
-
-        if not "pad_length" in drift_params:
-            raise Exception("Z-drift parameters must include a key 'pad_length'.")
-        if not "slice_interval" in drift_params:
-            raise Exception("Z-drift parameters must include a key 'slice_interval'.")
-
         image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
         image_files = [
             find_full_path(get_imaging_root_data_dir()[0], image_file)
@@ -379,10 +372,35 @@ class ZDriftMetrics(dj.Computed):
 
         zstack_files = get_zstack_files(key)
 
+        import nd2
+
         ca_imaging_movie = nd2.imread(image_files[0])
         zstack = nd2.imread(zstack_files[0])
-        ca_imaging_movie = ca_imaging_movie[:, 0, :, :]
-        zstack = zstack[:, 0, :, :]
+
+        if not all(
+            parameter in drift_params.keys()
+            for parameter in [
+                "pad_length",
+                "slice_interval",
+                "channel",
+                "num_scans",
+            ]
+        ):
+            raise dj.DataJointError(
+                "Z-drift parameters must include a keys for 'pad_length', 'slice_interval', 'num_scans', and 'channel'."
+            )
+
+        ca_imaging_movie = ca_imaging_movie[:, drift_params["channel"], :, :]
+
+        if drift_params["num_scans"] > 1 and nchannels > 1:
+            zstack = zstack.mean(axis=0)
+            zstack = zstack[:, drift_params["channel"], :, :]
+        elif drift_params["num_scans"] == 1 and nchannels > 1:
+            zstack = zstack[:, drift_params["channel"], :, :]
+        else:
+            raise NotImplementedError(
+                "Z-drift metrics for scans with only one channel are not yet supported."
+            )
 
         # center zstack
         zstack = zstack - zstack.mean(axis=(1, 2), keepdims=True)
