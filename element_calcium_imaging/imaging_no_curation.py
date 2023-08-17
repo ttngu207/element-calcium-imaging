@@ -387,7 +387,7 @@ class ZDriftMetrics(dj.Computed):
             ]
         ):
             raise dj.DataJointError(
-                "Z-drift parameters must include a keys for 'pad_length', 'slice_interval', 'num_scans', and 'channel'."
+                "Z-drift parameters must include keys for 'pad_length', 'slice_interval', 'num_scans', and 'channel'."
             )
 
         ca_imaging_movie = ca_imaging_movie[:, drift_params["channel"], :, :]
