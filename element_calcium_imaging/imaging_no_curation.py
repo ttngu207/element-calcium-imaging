@@ -363,6 +363,7 @@ class ZDriftMetrics(dj.Computed):
             return np.convolve(m, k, mode="full") / k.sum()
 
         nchannels = (scan.ScanInfo & key).fetch1("nchannels")
+        output_dir = (ProcessingParamSet & key).fetch1("processing_output_dir")
         drift_params = (ZDriftParamSet & key).fetch1("params")
         image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
         image_files = [
@@ -454,6 +455,21 @@ class ZDriftMetrics(dj.Computed):
         drift = ((np.argmax(np.stack(c).max(axis=0), axis=1)) - middle) * drift_params[
             "slice_interval"
         ]
+        
+        if "bad_frames_threshold" in drift_params:
+            bad_frames = np.where(drift > drift_params["bad_frames_threshold"])
+            full_output_dir = find_full_path(get_imaging_root_data_dir(), output_dir).as_posix()
+            outbox_symlink_path = (full_output_dir / "curation").as_posix()
+            outbox_symlink_path.mkdir(parents=True, exist_ok=True)
+            if outbox_symlink_path.exists():
+                outbox_symlink_path.unlink()
+            np.save((outbox_symlink_path / "bad_frames.npy"), bad_frames)
+            image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+            outbox_symlink_path.symlink_to([
+                find_full_path(get_imaging_root_data_dir(), image_file)
+                for image_file in image_files
+            ])
+            
 
         self.insert1(
             dict(**key, z_drift=drift),
@@ -485,7 +501,7 @@ class Processing(dj.Computed):
         """Limit the Processing to Scans that have their metadata ingested to the
         database."""
 
-        return ProcessingTask & scan.ScanInfo
+        return ProcessingTask & scan.ScanInfo & ZDriftMetrics
 
     def make(self, key):
         """Execute the calcium imaging analysis defined by the ProcessingTask."""
