@@ -291,45 +291,43 @@ class ProcessingTask(dj.Manual):
 @schema
 class ZDriftParamSet(dj.Manual):
     definition = """
-    paramset_idx: int
+    zdrift_paramset_idx: int
     ---
-    paramset_desc: varchar(1280)  # Parameter-set description
-    param_set_hash: uuid  # A universally unique identifier for the parameter set
+    z_paramset_desc: varchar(1280)  # Parameter-set description
+    z_param_set_hash: uuid  # A universally unique identifier for the parameter set
     unique index (param_set_hash)
-    params: longblob  # Parameter Set, a dictionary of all z-drift parameters.
+    z_params: longblob  # Parameter Set, a dictionary of all z-drift parameters.
     """
 
     @classmethod
     def insert_new_params(
         cls,
-        paramset_idx: int,
-        paramset_desc: str,
-        params: dict,
+        zdrift_paramset_idx: int,
+        z_paramset_desc: str,
+        z_params: dict,
     ):
-        """Insert a parameter set into ProcessingParamSet table.
+        """Insert a parameter set into ZDriftParamSet table.
 
         This function automates the parameter set hashing and avoids insertion of an
             existing parameter set.
 
         Attributes:
-            processing_method (str): Processing method/package used for processing of
-                calcium imaging.
-            paramset_idx (int): Unique parameter set ID.
-            paramset_desc (str): Parameter set description.
-            params (dict): Parameter Set, all applicable parameters to the
+            zdrift_paramset_idx (int): Unique parameter set ID.
+            z_paramset_desc (str): Parameter set description.
+            z_params (dict): Parameter Set, all applicable parameters to the
             z-axis correlation analysis.
         """
         param_dict = {
-            "paramset_idx": paramset_idx,
-            "paramset_desc": paramset_desc,
-            "params": params,
-            "param_set_hash": dict_to_uuid(params),
+            "zdrift_paramset_idx": zdrift_paramset_idx,
+            "z_paramset_desc": z_paramset_desc,
+            "z_params": z_params,
+            "z_param_set_hash": dict_to_uuid(z_params),
         }
-        q_param = cls & {"param_set_hash": param_dict["param_set_hash"]}
+        q_param = cls & {"z_param_set_hash": param_dict["z_param_set_hash"]}
 
         if q_param:  # If the specified param-set already exists
-            p_name = q_param.fetch1("paramset_idx")
-            if p_name == paramset_idx:  # If the existed set has the same name: job done
+            p_name = q_param.fetch1("zdrift_paramset_idx")
+            if p_name == zdrift_paramset_idx:  # If the existed set has the same name: job done
                 return
             else:  # If not same name: human error, trying to add the same paramset with different name
                 raise dj.DataJointError(
@@ -353,6 +351,7 @@ class ZDriftMetrics(dj.Computed):
     -> scan.Scan
     -> ZDriftParamSet
     ---
+    exceeds_threshold: boolean  # `True` if any value in z_drift > threshold from drift_params.
     z_drift: longblob   # Amount of drift in microns per frame in Z direction.
     """
 
@@ -455,24 +454,11 @@ class ZDriftMetrics(dj.Computed):
         drift = ((np.argmax(np.stack(c).max(axis=0), axis=1)) - middle) * drift_params[
             "slice_interval"
         ]
-        
-        if "bad_frames_threshold" in drift_params:
-            bad_frames = np.where(drift > drift_params["bad_frames_threshold"])
-            full_output_dir = find_full_path(get_imaging_root_data_dir(), output_dir).as_posix()
-            outbox_symlink_path = (full_output_dir / "curation").as_posix()
-            outbox_symlink_path.mkdir(parents=True, exist_ok=True)
-            if outbox_symlink_path.exists():
-                outbox_symlink_path.unlink()
-            np.save((outbox_symlink_path / "bad_frames.npy"), bad_frames)
-            image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
-            outbox_symlink_path.symlink_to([
-                find_full_path(get_imaging_root_data_dir(), image_file)
-                for image_file in image_files
-            ])
-            
 
+        exceed_theshold = any(value > drift_params["bad_frames_threshold"] for value in drift)
+        
         self.insert1(
-            dict(**key, z_drift=drift),
+            dict(**key, exceeds_threshold=exceed_theshold, z_drift=drift),
         )
 
 
@@ -538,15 +524,31 @@ class Processing(dj.Computed):
             else:
                 raise NotImplementedError("Unknown method: {}".format(method))
         elif task_mode == "trigger":
+            drop_frames = (ZDriftMetrics & key).fetch1("exceeds_threshold")
+            if drop_frames:
+                zdrift_key, z_drift = (ZDriftMetrics & key).fetch1("KEY", "z_drift")
+                drift_params = (ZDriftParamSet & zdrift_key).fetch1("z_params")
+                bad_frames = np.where(z_drift > drift_params["bad_frames_threshold"])
+                outbox_symlink_path = (output_dir / "curation").as_posix()
+                outbox_symlink_path.mkdir(parents=True, exist_ok=True)
+                if outbox_symlink_path.exists():
+                    outbox_symlink_path.unlink()
+                np.save((outbox_symlink_path / "bad_frames.npy"), bad_frames)
+                image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+                outbox_symlink_path.symlink_to([
+                    find_full_path(get_imaging_root_data_dir(), image_file)
+                    for image_file in image_files
+                ])
+            else:
+                image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+                image_files = [
+                    find_full_path(get_imaging_root_data_dir(), image_file)
+                    for image_file in image_files
+                ]
+
             method = (ProcessingParamSet * ProcessingTask & key).fetch1(
                 "processing_method"
             )
-
-            image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
-            image_files = [
-                find_full_path(get_imaging_root_data_dir(), image_file)
-                for image_file in image_files
-            ]
 
             if method == "suite2p":
                 import suite2p
