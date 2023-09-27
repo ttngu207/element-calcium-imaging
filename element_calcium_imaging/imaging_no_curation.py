@@ -351,7 +351,7 @@ class ZDriftMetrics(dj.Computed):
     -> scan.Scan
     -> ZDriftParamSet
     ---
-    exceeds_threshold: boolean  # `True` if any value in z_drift > threshold from drift_params.
+    bad_frames=NULL: longblob  # `True` if any value in z_drift > threshold from drift_params.
     z_drift: longblob   # Amount of drift in microns per frame in Z direction.
     """
 
@@ -455,10 +455,10 @@ class ZDriftMetrics(dj.Computed):
             "slice_interval"
         ]
 
-        exceed_theshold = any(value > drift_params["bad_frames_threshold"] for value in drift)
+        bad_frames_idx = np.where(drift >= drift_params["bad_frames_threshold"])[0]
         
         self.insert1(
-            dict(**key, exceeds_threshold=exceed_theshold, z_drift=drift),
+            dict(**key, bad_frames=bad_frames_idx, z_drift=drift),
         )
 
 
@@ -524,16 +524,13 @@ class Processing(dj.Computed):
             else:
                 raise NotImplementedError("Unknown method: {}".format(method))
         elif task_mode == "trigger":
-            drop_frames = (ZDriftMetrics & key).fetch1("exceeds_threshold")
-            if drop_frames:
-                zdrift_key, z_drift = (ZDriftMetrics & key).fetch1("KEY", "z_drift")
-                drift_params = (ZDriftParamSet & zdrift_key).fetch1("z_params")
-                bad_frames = np.where(z_drift > drift_params["bad_frames_threshold"])
+            drop_frames = (ZDriftMetrics & key).fetch1("bad_frames")
+            if drop_frames.size > 0:
                 outbox_symlink_path = (output_dir / "curation").as_posix()
                 outbox_symlink_path.mkdir(parents=True, exist_ok=True)
                 if outbox_symlink_path.exists():
                     outbox_symlink_path.unlink()
-                np.save((outbox_symlink_path / "bad_frames.npy"), bad_frames)
+                np.save((outbox_symlink_path / "bad_frames.npy"), drop_frames)
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 outbox_symlink_path.symlink_to([
                     find_full_path(get_imaging_root_data_dir(), image_file)
