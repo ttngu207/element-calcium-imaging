@@ -528,13 +528,18 @@ class Processing(dj.Computed):
                 outbox_symlink_path = (pathlib.Path(output_dir) / "curation")
                 outbox_symlink_path.mkdir(parents=True, exist_ok=True)
                 np.save((outbox_symlink_path / "bad_frames.npy"), drop_frames)
-                image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+                raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 files_to_link = [
-                    find_full_path(get_imaging_root_data_dir(), image_file)
-                    for image_file in image_files
+                    find_full_path(get_imaging_root_data_dir(), raw_image_file)
+                    for raw_image_file in raw_image_files
                 ]
+                image_files=[]
                 for file in files_to_link:
-                    (outbox_symlink_path / file.name).symlink_to(file)
+                    if not (outbox_symlink_path / file.name).is_symlink():
+                        (outbox_symlink_path / file.name).symlink_to(file)
+                        image_files.append((outbox_symlink_path / file.name))
+                    else:
+                        continue
             else:
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 image_files = [
