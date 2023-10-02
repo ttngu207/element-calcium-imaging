@@ -361,7 +361,7 @@ class ZDriftMetrics(dj.Computed):
             return np.convolve(m, k, mode="full") / k.sum()
 
         nchannels = (scan.ScanInfo & key).fetch1("nchannels")
-        output_dir = (ProcessingParamSet & key).fetch1("processing_output_dir")
+        output_dir = (ProcessingTask & key).fetch1("processing_output_dir")
         drift_params = (ZDriftParamSet & key).fetch1("params")
         image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
         image_files = [
