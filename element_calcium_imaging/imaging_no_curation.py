@@ -525,7 +525,7 @@ class Processing(dj.Computed):
         elif task_mode == "trigger":
             drop_frames = (ZDriftMetrics & key).fetch1("bad_frames")
             if drop_frames.size > 0:
-                outbox_symlink_path = (output_dir / "curation").as_posix()
+                outbox_symlink_path = (pathlib.Path(output_dir) / "curation")
                 outbox_symlink_path.mkdir(parents=True, exist_ok=True)
                 if outbox_symlink_path.exists():
                     outbox_symlink_path.unlink()
