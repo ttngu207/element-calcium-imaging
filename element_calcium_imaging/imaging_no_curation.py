@@ -362,7 +362,7 @@ class ZDriftMetrics(dj.Computed):
 
         nchannels = (scan.ScanInfo & key).fetch1("nchannels")
         output_dir = (ProcessingTask & key).fetch1("processing_output_dir")
-        drift_params = (ZDriftParamSet & key).fetch1("params")
+        drift_params = (ZDriftParamSet & key).fetch1("z_params")
         image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
         image_files = [
             find_full_path(get_imaging_root_data_dir()[0], image_file)
