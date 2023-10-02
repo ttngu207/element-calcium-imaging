@@ -527,8 +527,6 @@ class Processing(dj.Computed):
             if drop_frames.size > 0:
                 outbox_symlink_path = (pathlib.Path(output_dir) / "curation")
                 outbox_symlink_path.mkdir(parents=True, exist_ok=True)
-                if outbox_symlink_path.exists():
-                    outbox_symlink_path.unlink()
                 np.save((outbox_symlink_path / "bad_frames.npy"), drop_frames)
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 outbox_symlink_path.symlink_to([
