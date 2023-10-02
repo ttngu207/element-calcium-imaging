@@ -534,7 +534,10 @@ class Processing(dj.Computed):
                     for image_file in image_files
                 ]
                 for file in files_to_link:
-                    outbox_symlink_path.symlink_to(file)
+                    if not file.is_symlink():
+                        outbox_symlink_path.symlink_to(file)
+                    else:
+                        continue
             else:
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 image_files = [
