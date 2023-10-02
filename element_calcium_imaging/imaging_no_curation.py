@@ -294,8 +294,7 @@ class ZDriftParamSet(dj.Manual):
     zdrift_paramset_idx: int
     ---
     z_paramset_desc: varchar(1280)  # Parameter-set description
-    z_param_set_hash: uuid  # A universally unique identifier for the parameter set
-    unique index (param_set_hash)
+    z_param_set_hash: uuid  # # A universally unique identifier for the parameter set.
     z_params: longblob  # Parameter Set, a dictionary of all z-drift parameters.
     """
 
