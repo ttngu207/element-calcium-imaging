@@ -539,6 +539,7 @@ class Processing(dj.Computed):
                         (outbox_symlink_path / file.name).symlink_to(file)
                         image_files.append((outbox_symlink_path / file.name))
                     else:
+                        image_files.append((outbox_symlink_path / file.name))
                         continue
             else:
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
