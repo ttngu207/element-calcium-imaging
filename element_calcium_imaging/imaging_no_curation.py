@@ -537,18 +537,15 @@ class Processing(dj.Computed):
                     find_full_path(get_imaging_root_data_dir(), raw_image_file)
                     for raw_image_file in raw_image_files
                 ]
-                if not (files_to_link[0].parent / "bad_frames.npy").is_symlink():
-                    ((files_to_link[0].parent / "bad_frames.npy")).symlink_to((outbox_symlink_path / "bad_frames.npy"))
-                
-                image_files = files_to_link
-                # image_files=[]
-                # for file in files_to_link:
-                #     if not (outbox_symlink_path / file.name).is_symlink():
-                #         (outbox_symlink_path / file.name).symlink_to(file)
-                #         image_files.append((outbox_symlink_path / file.name))
-                #     else:
-                #         image_files.append((outbox_symlink_path / file.name))
-                #         continue
+
+                image_files=[]
+                for file in files_to_link:
+                    if not (outbox_symlink_path / file.name).is_symlink():
+                        (outbox_symlink_path / file.name).symlink_to(file)
+                        image_files.append((outbox_symlink_path / file.name))
+                    else:
+                        image_files.append((outbox_symlink_path / file.name))
+                        continue
             else:
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 image_files = [
