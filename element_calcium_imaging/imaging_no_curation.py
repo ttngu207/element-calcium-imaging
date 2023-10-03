@@ -501,6 +501,7 @@ class Processing(dj.Computed):
                 {**key, "processing_output_dir": output_dir.as_posix()}
             )
         output_dir = find_full_path(get_imaging_root_data_dir(), output_dir).as_posix()
+        print(output_dir)
 
         if task_mode == "load":
             method, imaging_dataset = get_loader_result(key, ProcessingTask)
