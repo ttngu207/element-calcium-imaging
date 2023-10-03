@@ -361,7 +361,6 @@ class ZDriftMetrics(dj.Computed):
             return np.convolve(m, k, mode="full") / k.sum()
 
         nchannels = (scan.ScanInfo & key).fetch1("nchannels")
-        output_dir = (ProcessingTask & key).fetch1("processing_output_dir")
         drift_params = (ZDriftParamSet & key).fetch1("z_params")
         image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
         image_files = [
@@ -526,8 +525,11 @@ class Processing(dj.Computed):
             drop_frames = (ZDriftMetrics & key).fetch1("bad_frames")
             if drop_frames.size > 0:
                 outbox_symlink_path = (pathlib.Path(output_dir) / "curation")
+                print(outbox_symlink_path)
                 outbox_symlink_path.mkdir(parents=True, exist_ok=True)
+                print("folder created.")
                 np.save((outbox_symlink_path / "bad_frames.npy"), drop_frames)
+                print("array saved")
                 raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 files_to_link = [
                     find_full_path(get_imaging_root_data_dir(), raw_image_file)
