@@ -525,7 +525,7 @@ class Processing(dj.Computed):
         elif task_mode == "trigger":
             drop_frames = (ZDriftMetrics & key).fetch1("bad_frames")
             if drop_frames.size > 0:
-                np.save(output_dir / "bad_frames.npy", drop_frames)
+                np.save(pathlib.Path(output_dir / "bad_frames.npy"), drop_frames)
                 print("array saved")
 
                 raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
