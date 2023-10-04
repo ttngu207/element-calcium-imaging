@@ -572,7 +572,7 @@ class Processing(dj.Computed):
                     "data_path": [image_files[0].parent.as_posix()],
                     "tiff_list": [f.as_posix() for f in image_files],
                 }
-
+                print([image_files[0].parent.as_posix()])
                 suite2p.run_s2p(ops=suite2p_params, db=suite2p_paths)  # Run suite2p
 
                 _, imaging_dataset = get_loader_result(key, ProcessingTask)
