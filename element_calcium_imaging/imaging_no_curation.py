@@ -529,7 +529,7 @@ class Processing(dj.Computed):
                 print(outbox_symlink_path)
                 outbox_symlink_path.mkdir(parents=True, exist_ok=True)
                 print("folder created.")
-                np.save((outbox_symlink_path / "bad_frames.npy"), drop_frames)
+                np.save(pathlib.Path(*outbox_symlink_path.parts[:2]) / "bad_frames.npy", drop_frames)
                 print("array saved")
 
                 raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
@@ -546,6 +546,9 @@ class Processing(dj.Computed):
                     else:
                         image_files.append((outbox_symlink_path / file.name))
                         continue
+            
+                if not (pathlib.Path(*outbox_symlink_path.parts[:2]) / "bad_frames.npy").is_symlink():
+                    (pathlib.Path(*outbox_symlink_path.parts[:2]) / "bad_frames.npy").symlink_to(outbox_symlink_path / "bad_frames.npy")
             else:
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 image_files = [
