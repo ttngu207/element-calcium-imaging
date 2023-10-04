@@ -500,8 +500,7 @@ class Processing(dj.Computed):
             ProcessingTask.update1(
                 {**key, "processing_output_dir": output_dir.as_posix()}
             )
-        output_dir = find_full_path(get_imaging_root_data_dir(), output_dir)
-        print(output_dir)
+        output_dir = find_full_path(get_imaging_root_data_dir(), output_dir).as_posix()
 
         if task_mode == "load":
             method, imaging_dataset = get_loader_result(key, ProcessingTask)
@@ -536,11 +535,11 @@ class Processing(dj.Computed):
 
                 image_files = []
                 for file in files_to_link:
-                    if not (output_dir / file.name).is_symlink():
-                        (output_dir / file.name).symlink_to(file)
-                        image_files.append((output_dir / file.name))
+                    if not (pathlib.Path(output_dir) / file.name).is_symlink():
+                        (pathlib.Path(output_dir) / file.name).symlink_to(file)
+                        image_files.append((pathlib.Path(output_dir) / file.name))
                     else:
-                        image_files.append((output_dir / file.name))
+                        image_files.append((pathlib.Path(output_dir) / file.name))
             
             else:
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
