@@ -326,7 +326,9 @@ class ZDriftParamSet(dj.Manual):
 
         if q_param:  # If the specified param-set already exists
             p_name = q_param.fetch1("zdrift_paramset_idx")
-            if p_name == zdrift_paramset_idx:  # If the existed set has the same name: job done
+            if (
+                p_name == zdrift_paramset_idx
+            ):  # If the existed set has the same name: job done
                 return
             else:  # If not same name: human error, trying to add the same paramset with different name
                 raise dj.DataJointError(
@@ -454,7 +456,7 @@ class ZDriftMetrics(dj.Computed):
         ]
 
         bad_frames_idx = np.where(drift >= drift_params["bad_frames_threshold"])[0]
-        
+
         self.insert1(
             dict(**key, bad_frames=bad_frames_idx, z_drift=drift),
         )
@@ -525,14 +527,11 @@ class Processing(dj.Computed):
             drop_frames = (ZDriftMetrics & key).fetch1("bad_frames")
             if drop_frames.size > 0:
                 np.save(pathlib.Path(output_dir) / "bad_frames.npy", drop_frames)
-                print("array saved")
-
                 raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 files_to_link = [
                     find_full_path(get_imaging_root_data_dir(), raw_image_file)
                     for raw_image_file in raw_image_files
                 ]
-
                 image_files = []
                 for file in files_to_link:
                     if not (pathlib.Path(output_dir) / file.name).is_symlink():
@@ -540,7 +539,7 @@ class Processing(dj.Computed):
                         image_files.append((pathlib.Path(output_dir) / file.name))
                     else:
                         image_files.append((pathlib.Path(output_dir) / file.name))
-            
+
             else:
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 image_files = [
@@ -572,7 +571,6 @@ class Processing(dj.Computed):
                     "data_path": [image_files[0].parent.as_posix()],
                     "tiff_list": [f.as_posix() for f in image_files],
                 }
-                print([image_files[0].parent.as_posix()])
                 suite2p.run_s2p(ops=suite2p_params, db=suite2p_paths)  # Run suite2p
 
                 _, imaging_dataset = get_loader_result(key, ProcessingTask)
