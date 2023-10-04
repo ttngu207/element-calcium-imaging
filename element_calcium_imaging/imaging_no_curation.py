@@ -525,11 +525,7 @@ class Processing(dj.Computed):
         elif task_mode == "trigger":
             drop_frames = (ZDriftMetrics & key).fetch1("bad_frames")
             if drop_frames.size > 0:
-                outbox_symlink_path = (pathlib.Path(output_dir) / "curation")
-                print(outbox_symlink_path)
-                outbox_symlink_path.mkdir(parents=True, exist_ok=True)
-                print("folder created.")
-                np.save(pathlib.Path(*outbox_symlink_path.parts[:2]) / "bad_frames.npy", drop_frames)
+                np.save(output_dir / "bad_frames.npy", drop_frames)
                 print("array saved")
 
                 raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
@@ -538,17 +534,14 @@ class Processing(dj.Computed):
                     for raw_image_file in raw_image_files
                 ]
 
-                image_files=[]
+                image_files = []
                 for file in files_to_link:
-                    if not (outbox_symlink_path / file.name).is_symlink():
-                        (outbox_symlink_path / file.name).symlink_to(file)
-                        image_files.append((outbox_symlink_path / file.name))
+                    if not (output_dir / file.name).is_symlink():
+                        (output_dir / file.name).symlink_to(file)
+                        image_files.append((output_dir / file.name))
                     else:
-                        image_files.append((outbox_symlink_path / file.name))
-                        continue
+                        image_files.append((output_dir / file.name))
             
-                if not (pathlib.Path(*outbox_symlink_path.parts[:2]) / "bad_frames.npy").is_symlink():
-                    (pathlib.Path(*outbox_symlink_path.parts[:2]) / "bad_frames.npy").symlink_to(outbox_symlink_path / "bad_frames.npy")
             else:
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 image_files = [
