@@ -500,7 +500,7 @@ class Processing(dj.Computed):
             ProcessingTask.update1(
                 {**key, "processing_output_dir": output_dir.as_posix()}
             )
-        output_dir = find_full_path(get_imaging_root_data_dir(), output_dir).as_posix()
+        output_dir = find_full_path(get_imaging_root_data_dir(), output_dir)
         print(output_dir)
 
         if task_mode == "load":
