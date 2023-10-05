@@ -524,9 +524,13 @@ class Processing(dj.Computed):
             else:
                 raise NotImplementedError("Unknown method: {}".format(method))
         elif task_mode == "trigger":
-            drop_frames = (ZDriftMetrics & key).fetch1("bad_frames")
-            if drop_frames.size > 0:
-                np.save(pathlib.Path(output_dir) / "bad_frames.npy", drop_frames)
+            drop_frames = (ZDriftMetrics & key).fetch("bad_frames")
+            if len(drop_frames) > 1:
+                raise dj.DataJointError(
+                    "Processing more than 1 set of `bad_frames` per scan is not currently supported."
+                )
+            if drop_frames[0].size > 0:
+                np.save(pathlib.Path(output_dir) / "bad_frames.npy", drop_frames[0])
                 raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 files_to_link = [
                     find_full_path(get_imaging_root_data_dir(), raw_image_file)
