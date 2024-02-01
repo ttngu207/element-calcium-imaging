@@ -5,7 +5,12 @@ from collections.abc import Callable
 
 import datajoint as dj
 import numpy as np
-from element_interface.utils import dict_to_uuid, find_full_path, find_root_directory
+from element_interface.utils import (
+    dict_to_uuid,
+    find_full_path,
+    find_root_directory,
+    memoized_result,
+)
 
 from . import imaging_report, scan
 from .scan import (
@@ -449,7 +454,14 @@ class Processing(dj.Computed):
                 }
                 suite2p_params["force_sktiff"] = True
 
-                suite2p.run_s2p(ops=suite2p_params, db=suite2p_paths)  # Run suite2p
+                @memoized_result(
+                    parameters={**key, **suite2p_params, **suite2p_paths},
+                    output_directory=output_dir,
+                )
+                def _run_s2p(*args, **kwargs):
+                    return suite2p.run_s2p(*args, **kwargs)
+
+                _run_s2p(ops=suite2p_params, db=suite2p_paths)  # Run suite2p
 
                 _, imaging_dataset = get_loader_result(key, ProcessingTask)
                 suite2p_dataset = imaging_dataset
