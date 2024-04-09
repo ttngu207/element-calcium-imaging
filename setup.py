@@ -38,22 +38,24 @@ setup(
         "ipykernel>=6.0.1",
         "ipywidgets",
         "plotly",
+        "element-interface @ git+https://github.com/datajoint/element-interface.git@staging",
     ],
     extras_require={
         "caiman_requirements": [caiman_requirements],
-        "caiman": ["caiman @ git+https://github.com/datajoint/CaImAn"],
+        "caiman": ["caiman @ git+https://github.com/datajoint/CaImAn.git"],
         "elements": [
-            "element-animal>=0.1.8",
-            "element-event>=0.2.3",
-            "element-interface @ git+https://github.com/datajoint/element-interface.git@multi-plane-caiman",
-            "element-lab>=0.3.0",
-            "element-session>=0.1.5",
+            "element-animal @ git+https://github.com/datajoint/element-animal.git",
+            "element-event @ git+https://github.com/datajoint/element-event.git",
+            "element-lab @ git+https://github.com/datajoint/element-lab.git",
+            "element-session @ git+https://github.com/datajoint/element-session.git",
         ],
         "extract": ["matlabengine", "scipy"],
         "nd2": ["nd2"],
-        "sbxreader": ["sbxreader @ git+https://github.com/jcouto/sbxreader"],
-        "scanreader": ["scanreader @ git+https://github.com/atlab/scanreader"],
-        "suite2p": ["suite2p[io]>=0.12.1"],
+        "sbxreader": ["sbxreader @ git+https://github.com/jcouto/sbxreader.git"],
+        "scanreader": ["scanreader @ git+https://github.com/atlab/scanreader.git"],
+        "suite2p": [
+            "suite2p[io] @ git+https://github.com/datajoint/suite2p.git@mesoscan"
+        ],
         "tests": ["pytest", "pytest-cov", "shutils"],
     },
 )
