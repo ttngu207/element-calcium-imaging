@@ -214,6 +214,7 @@ class ScanInfo(dj.Imported):
         scan_datetime (datetime, optional): Datetime of the scan.
         scan_duration (float, optional): Duration of the scan (s).
         bidirectional_z (bool, optional): True = bidirectional z-scan.
+        multi_tiff (bool): True = multi-tiff scan. Relevant for Bruker PrairieView.
     """
 
     definition = """ # General data about the resoscans/mesoscans from header
@@ -234,6 +235,7 @@ class ScanInfo(dj.Imported):
     scan_datetime=null   : datetime  # datetime of the scan
     scan_duration=null   : float     # (seconds) duration of the scan
     bidirectional_z=null : boolean   # true = bidirectional z-scan
+    multi_tiff=True      : boolean   # true = multi-tiff scan. Relevant for Bruker PrairieView
     """
 
     class Field(dj.Part):
@@ -547,6 +549,7 @@ class ScanInfo(dj.Imported):
                     usecs_per_line=PVScan_info["usecs_per_line"],
                     scan_datetime=PVScan_info["scan_datetime"],
                     scan_duration=PVScan_info["scan_duration"],
+                    multi_tiff=PVScan_info["multi_tiff"],
                 )
             )
 

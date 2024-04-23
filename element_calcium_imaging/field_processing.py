@@ -1,5 +1,6 @@
 import importlib
 import inspect
+import shutil
 import pathlib
 from collections.abc import Callable
 from datetime import datetime
@@ -74,7 +75,7 @@ class FieldPreprocessing(dj.Computed):
             * scan.ScanInfo.proj("nrois", "nfields")
             * imaging.ProcessingParamSet.proj("processing_method")
             & "task_mode = 'trigger'"
-        ) & "nfields > 1"
+        ) & "nfields >= 1"
         ks &= "(processing_method = 'suite2p' AND nrois > 0) OR (processing_method = 'caiman' AND nrois = 0)"
         return ks - imaging.Processing.proj()
 
@@ -105,9 +106,9 @@ class FieldPreprocessing(dj.Computed):
         acq_software = (scan.Scan & key).fetch1("acq_software")
 
         field_ind = (scan.ScanInfo.Field & key).fetch("field_idx")
-        sampling_rate, ndepths, nchannels, nfields, nrois = (
+        sampling_rate, ndepths, nchannels, nfields, nrois, multi_tiff = (
             scan.ScanInfo & key
-        ).fetch1("fps", "ndepths", "nchannels", "nfields", "nrois")
+        ).fetch1("fps", "ndepths", "nchannels", "nfields", "nrois", "multi_tiff")
 
         if method == "caiman" and acq_software == "PrairieView":
             from element_interface.prairie_view_loader import (
@@ -132,14 +133,18 @@ class FieldPreprocessing(dj.Computed):
                 prepared_input_dir = output_dir.parent / "prepared_input"
                 prepared_input_dir.mkdir(exist_ok=True)
 
-                image_files = [
-                    PVmeta.write_single_bigtiff(
-                        plane_idx=plane_idx,
-                        channel=channel,
-                        output_dir=prepared_input_dir,
-                        caiman_compatible=True,
-                    )
-                ]
+                if multi_tiff:
+                    shutil.copy(find_full_path(scan.get_imaging_root_data_dir(), image_file), prepared_input_dir)
+                    image_files = [prepared_input_dir / pathlib.Path(image_file).name]
+                else:
+                    image_files = [
+                        PVmeta.write_single_bigtiff(
+                            plane_idx=plane_idx,
+                            channel=channel,
+                            output_dir=prepared_input_dir,
+                            caiman_compatible=True,
+                        )
+                    ]
 
                 field_processing_tasks.append(
                     {
