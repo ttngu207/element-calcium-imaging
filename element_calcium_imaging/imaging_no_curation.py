@@ -15,6 +15,7 @@ from .scan import (
     get_processed_root_data_dir,
     get_scan_box_files,
     get_scan_image_files,
+    get_zstack_files,
 )
 
 schema = dj.Schema()
@@ -201,7 +202,7 @@ class MaskType(dj.Lookup):
     """Available labels for segmented masks (e.g. 'soma', 'axon', 'dendrite', 'neuropil').
 
     Attributes:
-        masky_type (str): Mask type.
+        mask_type (str): Mask type.
     """
 
     definition = """# Possible types of a segmented mask
@@ -221,8 +222,8 @@ class ProcessingTask(dj.Manual):
     This table defines a calcium imaging processing task for a combination of a
     `Scan` and a `ProcessingParamSet` entries, including all the inputs (scan, method,
     method's parameters). The task defined here is then run in the downstream table
-    Processing. This table supports definitions of both loading of pre-generated results
-    and the triggering of new analysis for all supported analysis methods
+    `Processing`. This table supports definitions of both loading of pre-generated results
+    and the triggering of new analysis for all supported analysis methods.
 
     Attributes:
         scan.Scan (foreign key):
@@ -286,60 +287,179 @@ class ProcessingTask(dj.Manual):
 
         return output_dir.relative_to(processed_dir) if relative else output_dir
 
+
+@schema
+class ZDriftParamSet(dj.Manual):
+    definition = """
+    zdrift_paramset_idx: int
+    ---
+    z_paramset_desc: varchar(1280)  # Parameter-set description
+    z_param_set_hash: uuid  # # A universally unique identifier for the parameter set.
+    z_params: longblob  # Parameter Set, a dictionary of all z-drift parameters.
+    """
+
     @classmethod
-    def generate(cls, scan_key, paramset_idx=0):
-        """Generate a ProcessingTask for a Scan using an parameter ProcessingParamSet
+    def insert_new_params(
+        cls,
+        zdrift_paramset_idx: int,
+        z_paramset_desc: str,
+        z_params: dict,
+    ):
+        """Insert a parameter set into ZDriftParamSet table.
 
-        Generate an entry in the ProcessingTask table for a particular scan using an
-        existing parameter set from the ProcessingParamSet table.
+        This function automates the parameter set hashing and avoids insertion of an
+            existing parameter set.
 
-        Args:
-            scan_key (dict): Primary key from Scan table.
-            paramset_idx (int): Unique parameter set ID.
+        Attributes:
+            zdrift_paramset_idx (int): Unique parameter set ID.
+            z_paramset_desc (str): Parameter set description.
+            z_params (dict): Parameter Set, all applicable parameters to the
+            z-axis correlation analysis.
         """
-        key = {**scan_key, "paramset_idx": paramset_idx}
+        param_dict = {
+            "zdrift_paramset_idx": zdrift_paramset_idx,
+            "z_paramset_desc": z_paramset_desc,
+            "z_params": z_params,
+            "z_param_set_hash": dict_to_uuid(z_params),
+        }
+        q_param = cls & {"z_param_set_hash": param_dict["z_param_set_hash"]}
 
-        processed_dir = get_processed_root_data_dir()
-        output_dir = cls.infer_output_dir(key, relative=False, mkdir=True)
-
-        method = (ProcessingParamSet & {"paramset_idx": paramset_idx}).fetch1(
-            "processing_method"
-        )
-
-        try:
-            if method == "suite2p":
-                from element_interface import suite2p_loader
-
-                suite2p_loader.Suite2p(output_dir)
-            elif method == "caiman":
-                from element_interface import caiman_loader
-
-                caiman_loader.CaImAn(output_dir)
-            elif method == "extract":
-                from element_interface import extract_loader
-
-                extract_loader.EXTRACT(output_dir)
-
-            else:
-                raise NotImplementedError(
-                    "Unknown/unimplemented method: {}".format(method)
+        if q_param:  # If the specified param-set already exists
+            p_name = q_param.fetch1("zdrift_paramset_idx")
+            if (
+                p_name == zdrift_paramset_idx
+            ):  # If the existed set has the same name: job done
+                return
+            else:  # If not same name: human error, trying to add the same paramset with different name
+                raise dj.DataJointError(
+                    "The specified param-set already exists - name: {}".format(p_name)
                 )
-        except FileNotFoundError:
-            task_mode = "trigger"
         else:
-            task_mode = "load"
+            cls.insert1(param_dict)
 
-        cls.insert1(
-            {
-                **key,
-                "processing_output_dir": output_dir.relative_to(
-                    processed_dir
-                ).as_posix(),
-                "task_mode": task_mode,
-            }
+
+@schema
+class ZDriftMetrics(dj.Computed):
+    """Generate z-axis motion report and drop frames with high motion.
+
+    Attributes:
+        ProcessingTask (foreign key): Primary key from ProcessingTask.
+        ZDriftParamSet (foreign key): Primary key from ZDriftParamSet.
+        z_drift (longblob): Amount of drift in microns per frame in Z direction.
+    """
+
+    definition = """
+    -> scan.Scan
+    -> ZDriftParamSet
+    ---
+    bad_frames=NULL: longblob  # `True` if any value in z_drift > threshold from drift_params.
+    z_drift: longblob   # Amount of drift in microns per frame in Z direction.
+    """
+
+    def make(self, key):
+        def _make_taper(size, width):
+            m = np.ones(size - width + 1)
+            k = np.hanning(width)
+            return np.convolve(m, k, mode="full") / k.sum()
+
+        nchannels = (scan.ScanInfo & key).fetch1("nchannels")
+        drift_params = (ZDriftParamSet & key).fetch1("z_params")
+        image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+        image_files = [
+            find_full_path(get_imaging_root_data_dir()[0], image_file)
+            for image_file in image_files
+        ]
+
+        zstack_files = get_zstack_files(key)
+
+        import nd2
+
+        ca_imaging_movie = nd2.imread(image_files[0])
+        zstack = nd2.imread(zstack_files[0])
+
+        if not all(
+            parameter in drift_params
+            for parameter in [
+                "pad_length",
+                "slice_interval",
+                "channel",
+                "num_scans",
+            ]
+        ):
+            raise dj.DataJointError(
+                "Z-drift parameters must include keys for 'pad_length', 'slice_interval', 'num_scans', and 'channel'."
+            )
+
+        ca_imaging_movie = ca_imaging_movie[:, drift_params["channel"], :, :]
+
+        if drift_params["num_scans"] > 1 and nchannels > 1:
+            zstack = zstack.mean(axis=0)
+            zstack = zstack[:, drift_params["channel"], :, :]
+        elif drift_params["num_scans"] == 1 and nchannels > 1:
+            zstack = zstack[:, drift_params["channel"], :, :]
+        else:
+            raise NotImplementedError(
+                "Z-drift metrics for scans with only one channel are not yet supported."
+            )
+
+        # center zstack
+        zstack = zstack - zstack.mean(axis=(1, 2), keepdims=True)
+
+        # taper zstack
+        ytaper = _make_taper(zstack.shape[1], drift_params["pad_length"])
+        zstack = zstack * ytaper[None, :, None]
+
+        xtaper = _make_taper(zstack.shape[2], drift_params["pad_length"])
+        zstack = zstack * xtaper[None, None, :]
+
+        # normalize zstack
+        zstack = zstack - zstack.mean(axis=(1, 2), keepdims=True)
+        zstack /= np.sqrt((zstack**2).sum(axis=(1, 2), keepdims=True))
+
+        # pad zstack
+        zstack = np.pad(
+            zstack,
+            (
+                (0, 0),
+                (drift_params["pad_length"], drift_params["pad_length"]),
+                (drift_params["pad_length"], drift_params["pad_length"]),
+            ),
         )
 
-    auto_generate_entries = generate
+        # normalize movie
+        ca_imaging_movie = ca_imaging_movie - ca_imaging_movie.mean(
+            axis=(1, 2), keepdims=True
+        )
+        ca_imaging_movie /= np.sqrt(
+            (ca_imaging_movie**2).sum(axis=(1, 2), keepdims=True)
+        )
+
+        # Vectorized implementation
+        middle = (zstack.shape[0] - 1) // 2
+        _, ny, nx = ca_imaging_movie.shape
+        offsets = list(
+            (dy, dx)
+            for dx in range(2 * drift_params["pad_length"] + 1)
+            for dy in range(2 * drift_params["pad_length"] + 1)
+        )
+        c = list(
+            np.einsum(
+                "dij, tij -> td",
+                zstack[:, dy : dy + ny, dx : dx + nx],
+                ca_imaging_movie,
+            )
+            for dy, dx in offsets
+        )
+
+        drift = ((np.argmax(np.stack(c).max(axis=0), axis=1)) - middle) * drift_params[
+            "slice_interval"
+        ]
+
+        bad_frames_idx = np.where(drift >= drift_params["bad_frames_threshold"])[0]
+
+        self.insert1(
+            dict(**key, bad_frames=bad_frames_idx, z_drift=drift),
+        )
 
 
 @schema
@@ -367,7 +487,7 @@ class Processing(dj.Computed):
         """Limit the Processing to Scans that have their metadata ingested to the
         database."""
 
-        return ProcessingTask & scan.ScanInfo
+        return ProcessingTask & scan.ScanInfo & ZDriftMetrics
 
     def make(self, key):
         """Execute the calcium imaging analysis defined by the ProcessingTask."""
@@ -404,16 +524,37 @@ class Processing(dj.Computed):
             else:
                 raise NotImplementedError("Unknown method: {}".format(method))
         elif task_mode == "trigger":
+            try:
+                drop_frames = (ZDriftMetrics & key).fetch1("bad_frames")
+            except dj.DataJointError:
+                raise dj.DataJointError(
+                    "Processing more than 1 set of `bad_frames` per scan is not currently supported."
+                )
+            if drop_frames.size > 0:
+                np.save(pathlib.Path(output_dir) / "bad_frames.npy", drop_frames)
+                raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+                files_to_link = [
+                    find_full_path(get_imaging_root_data_dir(), raw_image_file)
+                    for raw_image_file in raw_image_files
+                ]
+                image_files = []
+                for file in files_to_link:
+                    if not (pathlib.Path(output_dir) / file.name).is_symlink():
+                        (pathlib.Path(output_dir) / file.name).symlink_to(file)
+                        image_files.append((pathlib.Path(output_dir) / file.name))
+                    else:
+                        image_files.append((pathlib.Path(output_dir) / file.name))
+
+            else:
+                image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+                image_files = [
+                    find_full_path(get_imaging_root_data_dir(), image_file)
+                    for image_file in image_files
+                ]
 
             method = (ProcessingParamSet * ProcessingTask & key).fetch1(
                 "processing_method"
             )
-
-            image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
-            image_files = [
-                find_full_path(get_imaging_root_data_dir(), image_file)
-                for image_file in image_files
-            ]
 
             if method == "suite2p":
                 import suite2p
@@ -435,7 +576,6 @@ class Processing(dj.Computed):
                     "data_path": [image_files[0].parent.as_posix()],
                     "tiff_list": [f.as_posix() for f in image_files],
                 }
-
                 suite2p.run_s2p(ops=suite2p_params, db=suite2p_paths)  # Run suite2p
 
                 _, imaging_dataset = get_loader_result(key, ProcessingTask)
@@ -688,93 +828,99 @@ class MotionCorrection(dj.Imported):
             rigid_correction, nonrigid_correction, nonrigid_blocks = {}, {}, {}
             summary_images = []
             for idx, (plane, s2p) in enumerate(suite2p_dataset.planes.items()):
-                # -- rigid motion correction --
-                if idx == 0:
-                    rigid_correction = {
-                        **key,
-                        "y_shifts": s2p.ops["yoff"],
-                        "x_shifts": s2p.ops["xoff"],
-                        "z_shifts": np.full_like(s2p.ops["xoff"], 0),
-                        "y_std": np.nanstd(s2p.ops["yoff"]),
-                        "x_std": np.nanstd(s2p.ops["xoff"]),
-                        "z_std": np.nan,
-                        "outlier_frames": s2p.ops["badframes"],
-                    }
-                else:
-                    rigid_correction["y_shifts"] = np.vstack(
-                        [rigid_correction["y_shifts"], s2p.ops["yoff"]]
+                if not all(k in s2p.ops for k in ["xblock", "yblock", "nblocks"]):
+                    logger.warning(
+                        f"Unable to load/ingest non-rigid motion correction for plane {plane}."
+                        "Non-rigid motion correction data is not saved by Suite2p for versions above 0.10.*."
                     )
-                    rigid_correction["y_std"] = np.nanstd(
-                        rigid_correction["y_shifts"].flatten()
-                    )
-                    rigid_correction["x_shifts"] = np.vstack(
-                        [rigid_correction["x_shifts"], s2p.ops["xoff"]]
-                    )
-                    rigid_correction["x_std"] = np.nanstd(
-                        rigid_correction["x_shifts"].flatten()
-                    )
-                    rigid_correction["outlier_frames"] = np.logical_or(
-                        rigid_correction["outlier_frames"], s2p.ops["badframes"]
-                    )
-                # -- non-rigid motion correction --
-                if s2p.ops["nonrigid"]:
+                else: 
+                    # -- rigid motion correction --
                     if idx == 0:
-                        nonrigid_correction = {
+                        rigid_correction = {
                             **key,
-                            "block_height": s2p.ops["block_size"][0],
-                            "block_width": s2p.ops["block_size"][1],
-                            "block_depth": 1,
-                            "block_count_y": s2p.ops["nblocks"][0],
-                            "block_count_x": s2p.ops["nblocks"][1],
-                            "block_count_z": len(suite2p_dataset.planes),
+                            "y_shifts": s2p.ops["yoff"],
+                            "x_shifts": s2p.ops["xoff"],
+                            "z_shifts": np.full_like(s2p.ops["xoff"], 0),
+                            "y_std": np.nanstd(s2p.ops["yoff"]),
+                            "x_std": np.nanstd(s2p.ops["xoff"]),
+                            "z_std": np.nan,
                             "outlier_frames": s2p.ops["badframes"],
                         }
                     else:
-                        nonrigid_correction["outlier_frames"] = np.logical_or(
-                            nonrigid_correction["outlier_frames"],
-                            s2p.ops["badframes"],
+                        rigid_correction["y_shifts"] = np.vstack(
+                            [rigid_correction["y_shifts"], s2p.ops["yoff"]]
                         )
-                    for b_id, (b_y, b_x, bshift_y, bshift_x) in enumerate(
-                        zip(
-                            s2p.ops["xblock"],
-                            s2p.ops["yblock"],
-                            s2p.ops["yoff1"].T,
-                            s2p.ops["xoff1"].T,
+                        rigid_correction["y_std"] = np.nanstd(
+                            rigid_correction["y_shifts"].flatten()
                         )
-                    ):
-                        if b_id in nonrigid_blocks:
-                            nonrigid_blocks[b_id]["y_shifts"] = np.vstack(
-                                [nonrigid_blocks[b_id]["y_shifts"], bshift_y]
-                            )
-                            nonrigid_blocks[b_id]["y_std"] = np.nanstd(
-                                nonrigid_blocks[b_id]["y_shifts"].flatten()
-                            )
-                            nonrigid_blocks[b_id]["x_shifts"] = np.vstack(
-                                [nonrigid_blocks[b_id]["x_shifts"], bshift_x]
-                            )
-                            nonrigid_blocks[b_id]["x_std"] = np.nanstd(
-                                nonrigid_blocks[b_id]["x_shifts"].flatten()
-                            )
-                        else:
-                            nonrigid_blocks[b_id] = {
+                        rigid_correction["x_shifts"] = np.vstack(
+                            [rigid_correction["x_shifts"], s2p.ops["xoff"]]
+                        )
+                        rigid_correction["x_std"] = np.nanstd(
+                            rigid_correction["x_shifts"].flatten()
+                        )
+                        rigid_correction["outlier_frames"] = np.logical_or(
+                            rigid_correction["outlier_frames"], s2p.ops["badframes"]
+                        )
+                    # -- non-rigid motion correction --
+                    if s2p.ops["nonrigid"]:
+                        if idx == 0:
+                            nonrigid_correction = {
                                 **key,
-                                "block_id": b_id,
-                                "block_y": b_y,
-                                "block_x": b_x,
-                                "block_z": np.full_like(b_x, plane),
-                                "y_shifts": bshift_y,
-                                "x_shifts": bshift_x,
-                                "z_shifts": np.full(
-                                    (
-                                        len(suite2p_dataset.planes),
-                                        len(bshift_x),
-                                    ),
-                                    0,
-                                ),
-                                "y_std": np.nanstd(bshift_y),
-                                "x_std": np.nanstd(bshift_x),
-                                "z_std": np.nan,
+                                "block_height": s2p.ops["block_size"][0],
+                                "block_width": s2p.ops["block_size"][1],
+                                "block_depth": 1,
+                                "block_count_y": s2p.ops["nblocks"][0],
+                                "block_count_x": s2p.ops["nblocks"][1],
+                                "block_count_z": len(suite2p_dataset.planes),
+                                "outlier_frames": s2p.ops["badframes"],
                             }
+                        else:
+                            nonrigid_correction["outlier_frames"] = np.logical_or(
+                                nonrigid_correction["outlier_frames"],
+                                s2p.ops["badframes"],
+                            )
+                        for b_id, (b_y, b_x, bshift_y, bshift_x) in enumerate(
+                            zip(
+                                s2p.ops["xblock"],
+                                s2p.ops["yblock"],
+                                s2p.ops["yoff1"].T,
+                                s2p.ops["xoff1"].T,
+                            )
+                        ):
+                            if b_id in nonrigid_blocks:
+                                nonrigid_blocks[b_id]["y_shifts"] = np.vstack(
+                                    [nonrigid_blocks[b_id]["y_shifts"], bshift_y]
+                                )
+                                nonrigid_blocks[b_id]["y_std"] = np.nanstd(
+                                    nonrigid_blocks[b_id]["y_shifts"].flatten()
+                                )
+                                nonrigid_blocks[b_id]["x_shifts"] = np.vstack(
+                                    [nonrigid_blocks[b_id]["x_shifts"], bshift_x]
+                                )
+                                nonrigid_blocks[b_id]["x_std"] = np.nanstd(
+                                    nonrigid_blocks[b_id]["x_shifts"].flatten()
+                                )
+                            else:
+                                nonrigid_blocks[b_id] = {
+                                    **key,
+                                    "block_id": b_id,
+                                    "block_y": b_y,
+                                    "block_x": b_x,
+                                    "block_z": np.full_like(b_x, plane),
+                                    "y_shifts": bshift_y,
+                                    "x_shifts": bshift_x,
+                                    "z_shifts": np.full(
+                                        (
+                                            len(suite2p_dataset.planes),
+                                            len(bshift_x),
+                                        ),
+                                        0,
+                                    ),
+                                    "y_std": np.nanstd(bshift_y),
+                                    "x_std": np.nanstd(bshift_x),
+                                    "z_std": np.nan,
+                                }
 
                 # -- summary images --
                 motion_correction_key = (
@@ -1356,118 +1502,288 @@ class ActivityExtractionMethod(dj.Lookup):
         extraction_method (str): Extraction method.
     """
 
-    definition = """# Activity extraction method
+    definition = """
     extraction_method: varchar(32)
     """
 
-    contents = zip(["suite2p_deconvolution", "caiman_deconvolution", "caiman_dff"])
+    contents = zip(["suite2p", "caiman", "FISSA"])
+
+
+@schema
+class ActivityExtractionParamSet(dj.Lookup):
+    definition = """  #  Activity extraction parameter set used for the analysis/extraction of calcium events
+    activity_extraction_paramset_idx:  smallint
+    ---
+    -> ActivityExtractionMethod
+    paramset_desc: varchar(128)
+    param_set_hash: uuid
+    unique index (param_set_hash)
+    params: longblob  # dictionary of all applicable parameters
+    """
+
+    @classmethod
+    def insert_new_params(
+        cls,
+        extraction_method: str,
+        activity_extraction_paramset_idx: int,
+        paramset_desc: str,
+        params: dict,
+    ):
+        param_dict = {
+            "extraction_method": extraction_method,
+            "activity_extraction_paramset_idx": activity_extraction_paramset_idx,
+            "paramset_desc": paramset_desc,
+            "params": params,
+            "param_set_hash": dict_to_uuid(params),
+        }
+        q_param = cls & {"param_set_hash": param_dict["param_set_hash"]}
+
+        if q_param:  # If the specified param-set already exists
+            pname = q_param.fetch1("activity_extraction_paramset_idx")
+            if (
+                pname == activity_extraction_paramset_idx
+            ):  # If the existed set has the same name: job done
+                return
+            else:  # If not same name: human error, trying to add the same paramset with different name
+                raise dj.DataJointError(
+                    "The specified param-set already exists - name: {}".format(pname)
+                )
+        else:
+            cls.insert1(param_dict)
 
 
 @schema
 class Activity(dj.Computed):
-    """Inferred neural activity from fluorescence trace (e.g. dff, spikes, etc.).
+    """Inferred neural activity from fluorescence trace.
 
     Attributes:
         Fluorescence (foreign key): Primary key from Fluorescence.
-        ActivityExtractionMethod (foreign key): Primary key from
-            ActivityExtractionMethod.
+        ActivityExtractionParamSet (foreign key): Primary key from
+            ActivityExtractionParamSet.
     """
 
     definition = """# Neural Activity
     -> Fluorescence
-    -> ActivityExtractionMethod
+    -> ActivityExtractionParamSet 
     """
 
     class Trace(dj.Part):
-        """Trace(s) for each mask.
+        definition = """
+        -> master
+        -> Fluorescence.Trace
+        activity_type: varchar(16)  # e.g. z_score, Fcorrected
+        ---
+        activity_trace: longblob  # z score, neuropil corrected Fluorescence
+        """
+
+    def make(self, key):
+        # This code estimates the following quantities for each cell:
+        # 1) neuropil corrected fluorescence,
+        # 2) dff (only in old Fissa where F >= 0 constraint did not exist),
+        # 3) zscore.
+
+        import fissa
+        from collections import Counter
+        from .utils import calculate_dff, calculate_zscore, combine_trials
+
+        fissa_params = (ActivityExtractionParamSet & key).fetch1("params")
+
+        # processing_output_dir contains the paramset_id. The upload & ingest should be done accordingly.
+        output_dir = find_full_path(
+            get_imaging_root_data_dir(),
+            (ProcessingTask & key).fetch("processing_output_dir", limit=1)[0],
+        )
+
+        reg_img_dir = output_dir / "suite2p/plane0/reg_tif"
+        fissa_output_dir = output_dir / "FISSA_Suite2p"
+
+        # Required even though the FISSA is not triggered
+        cell_ids, mask_xpixs, mask_ypixs = (
+            Segmentation.Mask & MaskClassification.MaskType & key
+        ).fetch("mask", "mask_xpix", "mask_ypix")
+
+        # Trigger Condition
+        if not any(
+            (fissa_output_dir / p).exists() for p in ["separated.npy", "separated.npz"]
+        ):
+            fissa_output_dir.mkdir(parents=True, exist_ok=True)
+
+            Ly, Lx = (
+                (MotionCorrection.Summary & key)
+                .fetch("average_image", limit=1)[0]
+                .shape
+            )
+            rois = [np.zeros((Ly, Lx), dtype=bool) for n in range(len(cell_ids))]
+
+            # Find overlapping pixels to remove
+            pixel_counts = Counter(
+                list(zip(np.hstack(mask_xpixs), np.hstack(mask_ypixs)))
+            )
+            overlapping_pixels = [k for k, v in pixel_counts.items() if v > 1]
+
+            for i, (mask_xpix, mask_ypix) in enumerate(zip(mask_xpixs, mask_ypixs)):
+                is_pixel_overlapping = np.array(
+                    [
+                        True if (x, y) in overlapping_pixels else False
+                        for x, y in zip(mask_xpix, mask_ypix)
+                    ]
+                )
+                rois[i][
+                    mask_ypix[~is_pixel_overlapping], mask_xpix[~is_pixel_overlapping]
+                ] = 1
+
+            experiment = fissa.Experiment(
+                reg_img_dir.as_posix(),
+                [rois],
+                fissa_output_dir.as_posix(),
+                **fissa_params["init"],
+            )
+            experiment.separate(**fissa_params["exec"])
+
+        # Load the results
+        fissa_output_file = list(fissa_output_dir.glob("separated.np*"))[0]
+        fissa_output = np.load(fissa_output_file, allow_pickle=True)
+
+        # Old and new FISSA outputs are stored differently
+        # Two versions can be distinguised with the output file suffix.
+        # The new version infers non-zero traces; therefore no need for dff calculation.
+        trace_list = []
+        if fissa_output_file.suffix == ".npy":
+            for cell_id, result in zip(
+                cell_ids, fissa_output[3]
+            ):  # LuLab uses the 3rd component.
+                trace_list.append(
+                    dict(
+                        **key,
+                        mask=cell_id,
+                        fluo_channel=0,
+                        activity_type="corrected_fluorescence",
+                        activity_trace=result[0][0][0],
+                    )
+                )
+                dff = calculate_dff(result[0][0][0])
+                trace_list.append(
+                    dict(
+                        **key,
+                        mask=cell_id,
+                        fluo_channel=0,
+                        activity_type="dff",
+                        activity_trace=dff,
+                    )
+                )
+                trace_list.append(
+                    dict(
+                        **key,
+                        mask=cell_id,
+                        fluo_channel=0,
+                        activity_type="z_score",
+                        activity_trace=calculate_zscore(dff),
+                    )
+                )
+
+        else:
+            traces = combine_trials(fissa_output)
+            for cell_id, trace in zip(cell_ids, traces):
+                trace_list.append(
+                    dict(
+                        **key,
+                        mask=cell_id,
+                        fluo_channel=0,
+                        activity_type="Fcorrected",
+                        activity_trace=trace,
+                    )
+                )
+                trace_list.append(
+                    dict(
+                        **key,
+                        mask=cell_id,
+                        fluo_channel=0,
+                        activity_type="z_score",
+                        activity_trace=calculate_zscore(trace),
+                    )
+                )
+
+        self.insert1(key)
+        self.Trace.insert(trace_list)
+
+
+@schema
+class SpikeStat(dj.Computed):
+    """Spike Statistics
+
+    Attributes:
+        Activity (foreign key): Primary key from Activity.
+    """
+
+    definition = """
+    -> Activity
+    """
+
+    class Trace(dj.Part):
+        """Deconvolve the neuropil corrected calcium traces with OASIS to infer the spikes,
+        and calculate inter-event interval and area under the spike.
 
         Attributes:
-            Activity (foreign key): Primary key from Activity.
-            Fluorescence.Trace (foreign key): Fluorescence.Trace.
-            activity_trace (longblob): Neural activity from fluorescence trace.
+            SpikeStat (Primary key): Parent key from SpikeStat
+            Activity.Trace (Foreign key): Primary key from Activity.Trace.
+            spikes (longblob): Discretized deconvolved neural activity.
+            inferred_trace (longblob): Inferred fluorescence trace.
+            baseline (float): Inferred baseline calcium strength.
+            lambda (float): Optimal Lagrange multiplier for noise constraint (sparsity parameter).
+            g (float): Parameters of the autoregressive model, cardinality equivalent to p.
+            interevent_interval (longblob): Interevent interval calculated from the spikes.
+            area_under_spike (longblob): Area under the spike.
         """
 
         definition = """
         -> master
-        -> Fluorescence.Trace
+        -> Activity.Trace
         ---
-        activity_trace: longblob
+        spikes: longblob                # Discretized deconvolved neural activity.
+        inferred_trace: longblob        # Inferred fluorescence trace.
+        baseline: float                 # Inferred baseline calcium strength.
+        lambda: float                   # Optimal Lagrange multiplier for noise constraint (sparsity parameter).
+        g: float                        # Parameters of the autoregressive model, cardinality equivalent to p.
+        interevent_interval: longblob   # Interevent interval calculated from the spikes.
+        area_under_spike: longblob      # Area under the spike.
         """
-
-    @property
-    def key_source(self):
-        suite2p_key_source = (
-            Fluorescence
-            * ActivityExtractionMethod
-            * ProcessingParamSet.proj("processing_method")
-            & 'processing_method = "suite2p"'
-            & 'extraction_method LIKE "suite2p%"'
-        )
-        caiman_key_source = (
-            Fluorescence
-            * ActivityExtractionMethod
-            * ProcessingParamSet.proj("processing_method")
-            & 'processing_method = "caiman"'
-            & 'extraction_method LIKE "caiman%"'
-        )
-        return suite2p_key_source.proj() + caiman_key_source.proj()
 
     def make(self, key):
-        """
-        Populate the Activity with the results parsed from analysis outputs.
-        """
-        method, imaging_dataset = get_loader_result(key, ProcessingTask)
+        from oasis.functions import deconvolve
 
-        if method == "suite2p":
-            if key["extraction_method"] == "suite2p_deconvolution":
-                suite2p_dataset = imaging_dataset
-                # ---- iterate through all s2p plane outputs ----
-                spikes = [
-                    dict(
-                        key,
-                        mask=mask_idx,
-                        fluo_channel=0,
-                        activity_trace=spks,
-                    )
-                    for mask_idx, spks in enumerate(
-                        s
-                        for plane in suite2p_dataset.planes.values()
-                        for s in plane.spks
-                    )
-                ]
+        trace_keys, Fcorrecteds = np.stack(
+            (Activity.Trace & key & "activity_type='Fcorrected'").fetch(
+                "KEY", "activity_trace"
+            )
+        )
+        fps = (scan.ScanInfo & key).fetch1("fps")
 
-                self.insert1(key)
-                self.Trace.insert(spikes)
-        elif method == "caiman":
-            caiman_dataset = imaging_dataset
+        entry = []
+        for trace_key, Fcorrected in zip(trace_keys, Fcorrecteds):
+            c, s, b, g, lam = deconvolve(Fcorrected, penalty=0, optimize_g=5)
 
-            if key["extraction_method"] in (
-                "caiman_deconvolution",
-                "caiman_dff",
-            ):
-                attr_mapper = {
-                    "caiman_deconvolution": "spikes",
-                    "caiman_dff": "dff",
+            interevent_interval = np.diff(np.where(s > 1e-3)[0])
+            interevent_interval = interevent_interval[interevent_interval > 1] / fps
+
+            spike_times = np.where(s > 1e-3)[0]
+            grps = np.split(spike_times, np.where(np.diff(spike_times) != 1)[0] + 1)
+            area_under_spike = np.array([s[grp].sum() for grp in grps]) / fps
+
+            entry.append(
+                {
+                    **trace_key,
+                    "spikes": s,
+                    "inferred_trace": c,
+                    "baseline": b,
+                    "g": g,
+                    "lambda": lam,
+                    "interevent_interval": interevent_interval,
+                    "area_under_spike": area_under_spike,
                 }
+            )
 
-                # infer "segmentation_channel" - from params if available, else from caiman loader
-                params = (ProcessingParamSet * ProcessingTask & key).fetch1("params")
-                segmentation_channel = params.get(
-                    "segmentation_channel", caiman_dataset.segmentation_channel
-                )
-
-                self.insert1(key)
-                self.Trace.insert(
-                    dict(
-                        key,
-                        mask=mask["mask_id"],
-                        fluo_channel=segmentation_channel,
-                        activity_trace=mask[attr_mapper[key["extraction_method"]]],
-                    )
-                    for mask in caiman_dataset.masks
-                )
-        else:
-            raise NotImplementedError("Unknown/unimplemented method: {}".format(method))
+        self.insert1(key)
+        self.Trace.insert(entry)
 
 
 # ---------------- HELPER FUNCTIONS ----------------

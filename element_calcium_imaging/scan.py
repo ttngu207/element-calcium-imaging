@@ -150,6 +150,18 @@ def get_prairieview_files(scan_key: dict) -> list:
     """
     return _linking_module.get_prairieview_files(scan_key)
 
+def get_zstack_files(scan_key: dict) -> list:
+    """Retrieve the list of zstack files associated with a given Scan.
+
+    Args:
+        scan_key: Primary key of a Scan entry.
+
+    Returns:
+        A list of zstack files' full file-paths.
+    """
+
+    return _linking_module.get_zstack_files(scan_key)
+
 
 # ----------------------------- Table declarations ----------------------
 
