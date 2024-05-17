@@ -18,6 +18,8 @@ from .scan import (
     get_zstack_files,
 )
 
+
+logger = dj.logger
 schema = dj.Schema()
 
 _linking_module = None
