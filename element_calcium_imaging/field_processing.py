@@ -276,12 +276,19 @@ class FieldProcessing(dj.Computed):
         sampling_rate = (scan.ScanInfo & key).fetch1("fps")
 
         if acq_software == "PrairieView" and method == "caiman":
+            import tifffile
+            from caiman.summary_images import local_correlations
             from element_interface.run_caiman import run_caiman
 
             file_paths = [
                 find_full_path(processed_root_data_dir, f)
                 for f in extra_params["image_files"]
             ]
+            rho = local_correlations(
+                            tifffile.imread(file_paths)
+                        )
+            half_median_correlation = np.median(rho) / 2
+            params["min_corr"] = half_median_correlation
 
             run_caiman(
                 file_paths=file_paths,

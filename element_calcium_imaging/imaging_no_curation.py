@@ -523,7 +523,7 @@ class Processing(dj.Computed):
                             )
                         ]
                         rho = local_correlations(
-                            tifffile.imread(image_files[0])
+                            tifffile.imread(image_files)
                         )
                         half_median_correlation = np.median(rho) / 2
                         caiman_params["min_corr"] = half_median_correlation
