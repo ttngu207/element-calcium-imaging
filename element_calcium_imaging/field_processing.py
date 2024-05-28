@@ -12,7 +12,7 @@ from element_interface.utils import dict_to_uuid, find_full_path, find_root_dire
 
 from . import scan
 
-log = dj.logger
+logger = dj.logger
 
 schema = dj.schema()
 
@@ -288,6 +288,7 @@ class FieldProcessing(dj.Computed):
                             tifffile.imread(file_paths)
                         )
             half_median_correlation = np.median(rho) / 2
+            logger.info("Min correlation set to: %f", half_median_correlation)
             params["min_corr"] = half_median_correlation
 
             run_caiman(
