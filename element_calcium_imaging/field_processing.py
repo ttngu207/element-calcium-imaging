@@ -1,5 +1,6 @@
 import importlib
 import inspect
+import shutil
 import pathlib
 from collections.abc import Callable
 from datetime import datetime
@@ -11,7 +12,7 @@ from element_interface.utils import dict_to_uuid, find_full_path, find_root_dire
 
 from . import scan
 
-log = dj.logger
+logger = dj.logger
 
 schema = dj.schema()
 
@@ -74,7 +75,7 @@ class FieldPreprocessing(dj.Computed):
             * scan.ScanInfo.proj("nrois", "nfields")
             * imaging.ProcessingParamSet.proj("processing_method")
             & "task_mode = 'trigger'"
-        ) & "nfields > 1"
+        ) & "nfields >= 1"
         ks &= "(processing_method = 'suite2p' AND nrois > 0) OR (processing_method = 'caiman' AND nrois = 0)"
         return ks - imaging.Processing.proj()
 
@@ -275,12 +276,20 @@ class FieldProcessing(dj.Computed):
         sampling_rate = (scan.ScanInfo & key).fetch1("fps")
 
         if acq_software == "PrairieView" and method == "caiman":
+            import tifffile
+            from caiman.summary_images import local_correlations
             from element_interface.run_caiman import run_caiman
 
             file_paths = [
                 find_full_path(processed_root_data_dir, f)
                 for f in extra_params["image_files"]
             ]
+            rho = local_correlations(
+                            tifffile.imread(file_paths)
+                        )
+            half_median_correlation = np.median(rho) / 2
+            logger.info("Min correlation set to: %f", half_median_correlation)
+            params["min_corr"] = half_median_correlation
 
             run_caiman(
                 file_paths=file_paths,

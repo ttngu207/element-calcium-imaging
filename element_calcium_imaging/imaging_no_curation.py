@@ -458,6 +458,8 @@ class Processing(dj.Computed):
                 suite2p.run_s2p(ops=suite2p_params, db=suite2p_paths)  # Run suite2p
 
             elif method == "caiman":
+                import tifffile
+                from caiman.summary_images import local_correlations
                 from element_interface.caiman_loader import _process_scanimage_tiff
                 from element_interface.run_caiman import run_caiman
 
@@ -472,6 +474,7 @@ class Processing(dj.Computed):
                     )
 
                 channel = caiman_params.get("channel_to_process", 0)
+
 
                 if ndepths == 1:  # single-plane processing
                     if acq_software == "ScanImage":
@@ -519,6 +522,12 @@ class Processing(dj.Computed):
                                 caiman_compatible=True,
                             )
                         ]
+                        rho = local_correlations(
+                            tifffile.imread(image_files)
+                        )
+                        half_median_correlation = np.median(rho) / 2
+                        caiman_params["min_corr"] = half_median_correlation
+
 
                     run_caiman(
                         file_paths=[f.as_posix() for f in image_files],
