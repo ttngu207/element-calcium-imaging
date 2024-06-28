@@ -284,10 +284,16 @@ class FieldProcessing(dj.Computed):
                 find_full_path(processed_root_data_dir, f)
                 for f in extra_params["image_files"]
             ]
-            rho = local_correlations(
-                            tifffile.imread(file_paths)
-                        )
+
+            images = []
+            for f in file_paths:
+                with tifffile.TiffFile(f) as tffl:
+                    # downsample by 1000x in time
+                    images.append(tffl.asarray(key=np.arange(0, len(tffl.pages), 1000)).transpose(1, 2, 0))
+            
+            rho = local_correlations(np.dstack(images))
             half_median_correlation = np.median(rho) / 2
+
             logger.info("Min correlation set to: %f", half_median_correlation)
             params["min_corr"] = half_median_correlation
 
