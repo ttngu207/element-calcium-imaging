@@ -335,12 +335,12 @@ class FieldPostProcessing(dj.Computed):
         per_plane_proc = (
             FieldPreprocessing.aggr(
                 FieldPreprocessing.Field.proj(),
-                field_count="count(*)",
+                field_count="count(field_idx)",
                 keep_all_rows=True,
             )
             * FieldPreprocessing.aggr(
                 FieldProcessing.proj(),
-                finished_field_count="count(*)",
+                finished_field_count="count(field_idx)",
                 keep_all_rows=True,
             )
             & "field_count = finished_field_count"
