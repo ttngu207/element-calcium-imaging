@@ -292,7 +292,7 @@ class FieldProcessing(dj.Computed):
                     images.append(tffl.asarray(key=np.arange(0, len(tffl.pages), 1000)).transpose(1, 2, 0))
             
             rho = local_correlations(np.dstack(images))
-            half_median_correlation = np.median(rho) / 2
+            half_median_correlation = np.nanmedian(rho) / 2
 
             logger.info("Min correlation set to: %f", half_median_correlation)
             params["min_corr"] = half_median_correlation
