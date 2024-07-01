@@ -14,6 +14,8 @@ from .scan import (
     get_processed_root_data_dir,
 )
 
+logger = dj.logger
+
 schema = dj.Schema()
 
 _linking_module = None
@@ -354,18 +356,25 @@ class Processing(dj.Computed):
     # Run processing only on Scan with ScanInfo inserted
     @property
     def key_source(self):
-        """Limit the Processing to Scans that have their metadata ingested to the
-        database."""
-
         return ProcessingTask & scan.ScanInfo
 
     def make(self, key):
-        """Execute the calcium imaging analysis defined by the ProcessingTask."""
+        """
+        Execute the calcium imaging analysis defined by the ProcessingTask.
+        - task_mode: 'load', confirm that the results are already computed
+        - task_mode is 'trigger'
+            1. method is "caiman":
+                - if "multi-ROI" - raise NotImplementedError
+                - if single-plane - run CaImAn as usual for ScanImage/PrairieView - check for multi-channel
+                - if multi-plane - delegate to "field_processing"
+            2. method is "suite2p":
+                - if "multi-ROI" - delegate to "field_processing"
+                - else run Suite2p as usual
+        """
 
         task_mode, output_dir = (ProcessingTask & key).fetch1(
             "task_mode", "processing_output_dir"
         )
-        acq_software = (scan.Scan & key).fetch1("acq_software")
 
         if not output_dir:
             output_dir = ProcessingTask.infer_output_dir(key, relative=True, mkdir=True)
@@ -409,25 +418,33 @@ class Processing(dj.Computed):
             method = (ProcessingParamSet * ProcessingTask & key).fetch1(
                 "processing_method"
             )
+            acq_software = (scan.Scan & key).fetch1("acq_software")
 
-            image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
-            image_files = [
-                find_full_path(get_imaging_root_data_dir(), image_file)
-                for image_file in image_files
-            ]
+            sampling_rate, ndepths, nchannels, nfields, nrois = (
+                scan.ScanInfo & key
+            ).fetch1("fps", "ndepths", "nchannels", "nfields", "nrois")
 
             if method == "suite2p":
+                if nrois > 0:
+                    raise NotImplementedError(
+                        "Multi-ROI processing using Suite2p is not implemented here (suggest using `field_processing`)."
+                    )
+
                 import suite2p
+
+                image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+                image_files = [
+                    find_full_path(get_imaging_root_data_dir(), image_file)
+                    for image_file in image_files
+                ]
 
                 suite2p_params = (ProcessingTask * ProcessingParamSet & key).fetch1(
                     "params"
                 )
                 suite2p_params["save_path0"] = output_dir
-                (
-                    suite2p_params["fs"],
-                    suite2p_params["nplanes"],
-                    suite2p_params["nchannels"],
-                ) = (scan.ScanInfo & key).fetch1("fps", "ndepths", "nchannels")
+                suite2p_params["fs"] = sampling_rate
+                suite2p_params["nplanes"] = ndepths
+                suite2p_params["nchannels"] = nchannels
 
                 input_format = pathlib.Path(image_files[0]).suffix
                 suite2p_params["input_format"] = input_format[1:]
@@ -436,51 +453,99 @@ class Processing(dj.Computed):
                     "data_path": [image_files[0].parent.as_posix()],
                     "tiff_list": [f.as_posix() for f in image_files],
                 }
+                suite2p_params["force_sktiff"] = True
 
                 suite2p.run_s2p(ops=suite2p_params, db=suite2p_paths)  # Run suite2p
 
-                _, imaging_dataset = get_loader_result(key, ProcessingTask)
-                suite2p_dataset = imaging_dataset
-                key = {**key, "processing_time": suite2p_dataset.creation_time}
-
             elif method == "caiman":
+                import tifffile
+                from caiman.summary_images import local_correlations
                 from element_interface.caiman_loader import _process_scanimage_tiff
                 from element_interface.run_caiman import run_caiman
 
                 caiman_params = (ProcessingTask * ProcessingParamSet & key).fetch1(
                     "params"
                 )
-                sampling_rate, ndepths, nchannels = (scan.ScanInfo & key).fetch1(
-                    "fps", "ndepths", "nchannels"
-                )
 
-                is3D = bool(ndepths > 1)
+                is3D = caiman_params.get("is3D", False)
                 if is3D:
                     raise NotImplementedError(
-                        "Caiman pipeline is not yet capable of analyzing 3D scans."
+                        "Analyzing 3D scans using CaImAn is not yet supported in this pipeline."
                     )
 
-                if acq_software == "ScanImage" and nchannels > 1:
-                    # handle multi-channel tiff image before running CaImAn
-                    channel_idx = caiman_params.get("channel_to_process", 0)
-                    tmp_dir = pathlib.Path(output_dir) / "channel_separated_tif"
-                    tmp_dir.mkdir(exist_ok=True)
-                    _process_scanimage_tiff(
-                        [f.as_posix() for f in image_files], output_dir=tmp_dir
+                channel = caiman_params.get("channel_to_process", 0)
+
+
+                if ndepths == 1:  # single-plane processing
+                    if acq_software == "ScanImage":
+                        if nchannels > 1:
+                            # handle multi-channel tiff image before running CaImAn
+                            image_files = (scan.ScanInfo.ScanFile & key).fetch(
+                                "file_path"
+                            )
+                            image_files = [
+                                find_full_path(get_imaging_root_data_dir(), image_file)
+                                for image_file in image_files
+                            ]
+
+                            prepared_input_dir = (
+                                pathlib.Path(output_dir) / "prepared_input"
+                            )
+                            prepared_input_dir.mkdir(exist_ok=True)
+                            _process_scanimage_tiff(
+                                [f.as_posix() for f in image_files],
+                                output_dir=prepared_input_dir,
+                            )
+                            image_files = prepared_input_dir.glob(f"*_chn{channel}.tif")
+                    elif acq_software == "PrairieView":
+                        from element_interface.prairie_view_loader import (
+                            PrairieViewMeta,
+                        )
+
+                        image_file = (scan.ScanInfo.ScanFile & key).fetch(
+                            "file_path", limit=1
+                        )[0]
+                        image_file = find_full_path(
+                            get_imaging_root_data_dir(), image_file
+                        )
+                        pv_dir = pathlib.Path(image_file).parent
+                        PVmeta = PrairieViewMeta(pv_dir)
+                        channel = (
+                            channel
+                            if PVmeta.meta["num_channels"] > 1
+                            else PVmeta.meta["channels"][0]
+                        )
+                        image_files = [
+                            PVmeta.write_single_bigtiff(
+                                channel=channel,
+                                output_dir=output_dir,
+                                caiman_compatible=True,
+                            )
+                        ]
+                        rho = local_correlations(
+                            tifffile.imread(image_files)
+                        )
+                        half_median_correlation = np.median(rho) / 2
+                        caiman_params["min_corr"] = half_median_correlation
+
+
+                    run_caiman(
+                        file_paths=[f.as_posix() for f in image_files],
+                        parameters=caiman_params,
+                        sampling_rate=sampling_rate,
+                        output_dir=output_dir,
+                        is3D=is3D,
                     )
-                    image_files = tmp_dir.glob(f"*_chn{channel_idx}.tif")
-
-                run_caiman(
-                    file_paths=[f.as_posix() for f in image_files],
-                    parameters=caiman_params,
-                    sampling_rate=sampling_rate,
-                    output_dir=output_dir,
-                    is3D=is3D,
-                )
-
-                _, imaging_dataset = get_loader_result(key, ProcessingTask)
-                caiman_dataset = imaging_dataset
-                key["processing_time"] = caiman_dataset.creation_time
+                else:  # multi-plane processing
+                    # per-plane processing with CaImAn
+                    if acq_software == "ScanImage":
+                        raise NotImplementedError(
+                            "Multi-plane processing using CaImAn for ScanImage scans is not yet supported in this pipeline."
+                        )
+                    elif acq_software == "PrairieView":
+                        raise NotImplementedError(
+                            "Multi-plane processing using CaImAn for PrairieView scans is not implemented here (suggest using `field_processing`)."
+                        )
 
             elif method == "extract":
                 import suite2p
@@ -489,6 +554,12 @@ class Processing(dj.Computed):
 
                 # Motion Correction with Suite2p
                 params = (ProcessingTask * ProcessingParamSet & key).fetch1("params")
+
+                image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
+                image_files = [
+                    find_full_path(get_imaging_root_data_dir(), image_file)
+                    for image_file in image_files
+                ]
 
                 params["suite2p"]["save_path0"] = output_dir
                 (
@@ -524,19 +595,22 @@ class Processing(dj.Computed):
                 )
 
                 # Execute EXTRACT
-
                 ex = EXTRACT_trigger(
                     scan_matlab_fullpath, params["extract"], output_dir
                 )
                 ex.run()
-
-                _, extract_dataset = get_loader_result(key, ProcessingTask)
-                key["processing_time"] = extract_dataset.creation_time
-
         else:
             raise ValueError(f"Unknown task mode: {task_mode}")
 
-        self.insert1({**key, "package_version": ""})
+        _, processed_results = get_loader_result(key, ProcessingTask)
+
+        self.insert1(
+            {
+                **key,
+                "processing_time": getattr(processed_results, "creation_time"),
+                "package_version": "",
+            }
+        )
 
 
 # -------------- Motion Correction --------------
@@ -643,7 +717,7 @@ class MotionCorrection(dj.Imported):
         block_z         : longblob  # (z_start, z_end) in pixel of this block
         y_shifts        : longblob  # (pixels) y motion correction shifts for every frame
         x_shifts        : longblob  # (pixels) x motion correction shifts for every frame
-        z_shifts=null   : longblob  # (pixels) x motion correction shifts for every frame
+        z_shifts=null   : longblob  # (pixels) z motion correction shifts for every frame
         y_std           : float     # (pixels) standard deviation of y shifts across all frames
         x_std           : float     # (pixels) standard deviation of x shifts across all frames
         z_std=null      : float     # (pixels) standard deviation of z shifts across all frames
@@ -720,63 +794,69 @@ class MotionCorrection(dj.Imported):
                     )
                 # -- non-rigid motion correction --
                 if s2p.ops["nonrigid"]:
-                    if idx == 0:
-                        nonrigid_correction = {
-                            **key,
-                            "block_height": s2p.ops["block_size"][0],
-                            "block_width": s2p.ops["block_size"][1],
-                            "block_depth": 1,
-                            "block_count_y": s2p.ops["nblocks"][0],
-                            "block_count_x": s2p.ops["nblocks"][1],
-                            "block_count_z": len(suite2p_dataset.planes),
-                            "outlier_frames": s2p.ops["badframes"],
-                        }
+                    if not all(k in s2p.ops for k in ["xblock", "yblock", "nblocks"]):
+                        logger.warning(
+                            f"Unable to load/ingest nonrigid motion correction for plane {plane}. "
+                            f"Nonrigid motion correction output is no longer saved by Suite2p for version above 0.10.*."
+                        )
                     else:
-                        nonrigid_correction["outlier_frames"] = np.logical_or(
-                            nonrigid_correction["outlier_frames"],
-                            s2p.ops["badframes"],
-                        )
-                    for b_id, (b_y, b_x, bshift_y, bshift_x) in enumerate(
-                        zip(
-                            s2p.ops["xblock"],
-                            s2p.ops["yblock"],
-                            s2p.ops["yoff1"].T,
-                            s2p.ops["xoff1"].T,
-                        )
-                    ):
-                        if b_id in nonrigid_blocks:
-                            nonrigid_blocks[b_id]["y_shifts"] = np.vstack(
-                                [nonrigid_blocks[b_id]["y_shifts"], bshift_y]
-                            )
-                            nonrigid_blocks[b_id]["y_std"] = np.nanstd(
-                                nonrigid_blocks[b_id]["y_shifts"].flatten()
-                            )
-                            nonrigid_blocks[b_id]["x_shifts"] = np.vstack(
-                                [nonrigid_blocks[b_id]["x_shifts"], bshift_x]
-                            )
-                            nonrigid_blocks[b_id]["x_std"] = np.nanstd(
-                                nonrigid_blocks[b_id]["x_shifts"].flatten()
-                            )
-                        else:
-                            nonrigid_blocks[b_id] = {
+                        if idx == 0:
+                            nonrigid_correction = {
                                 **key,
-                                "block_id": b_id,
-                                "block_y": b_y,
-                                "block_x": b_x,
-                                "block_z": np.full_like(b_x, plane),
-                                "y_shifts": bshift_y,
-                                "x_shifts": bshift_x,
-                                "z_shifts": np.full(
-                                    (
-                                        len(suite2p_dataset.planes),
-                                        len(bshift_x),
-                                    ),
-                                    0,
-                                ),
-                                "y_std": np.nanstd(bshift_y),
-                                "x_std": np.nanstd(bshift_x),
-                                "z_std": np.nan,
+                                "block_height": s2p.ops["block_size"][0],
+                                "block_width": s2p.ops["block_size"][1],
+                                "block_depth": 1,
+                                "block_count_y": s2p.ops["nblocks"][0],
+                                "block_count_x": s2p.ops["nblocks"][1],
+                                "block_count_z": len(suite2p_dataset.planes),
+                                "outlier_frames": s2p.ops["badframes"],
                             }
+                        else:
+                            nonrigid_correction["outlier_frames"] = np.logical_or(
+                                nonrigid_correction["outlier_frames"],
+                                s2p.ops["badframes"],
+                            )
+                        for b_id, (b_y, b_x, bshift_y, bshift_x) in enumerate(
+                            zip(
+                                s2p.ops["xblock"],
+                                s2p.ops["yblock"],
+                                s2p.ops["yoff1"].T,
+                                s2p.ops["xoff1"].T,
+                            )
+                        ):
+                            if b_id in nonrigid_blocks:
+                                nonrigid_blocks[b_id]["y_shifts"] = np.vstack(
+                                    [nonrigid_blocks[b_id]["y_shifts"], bshift_y]
+                                )
+                                nonrigid_blocks[b_id]["y_std"] = np.nanstd(
+                                    nonrigid_blocks[b_id]["y_shifts"].flatten()
+                                )
+                                nonrigid_blocks[b_id]["x_shifts"] = np.vstack(
+                                    [nonrigid_blocks[b_id]["x_shifts"], bshift_x]
+                                )
+                                nonrigid_blocks[b_id]["x_std"] = np.nanstd(
+                                    nonrigid_blocks[b_id]["x_shifts"].flatten()
+                                )
+                            else:
+                                nonrigid_blocks[b_id] = {
+                                    **key,
+                                    "block_id": b_id,
+                                    "block_y": b_y,
+                                    "block_x": b_x,
+                                    "block_z": np.full_like(b_x, plane),
+                                    "y_shifts": bshift_y,
+                                    "x_shifts": bshift_x,
+                                    "z_shifts": np.full(
+                                        (
+                                            len(suite2p_dataset.planes),
+                                            len(bshift_x),
+                                        ),
+                                        0,
+                                    ),
+                                    "y_std": np.nanstd(bshift_y),
+                                    "x_std": np.nanstd(bshift_x),
+                                    "z_std": np.nan,
+                                }
 
                 # -- summary images --
                 motion_correction_key = (
@@ -809,150 +889,21 @@ class MotionCorrection(dj.Imported):
                 }
             )
 
-            is3D = caiman_dataset.params.motion["is3D"]
-            if not caiman_dataset.params.motion["pw_rigid"]:
-                # -- rigid motion correction --
-                rigid_correction = {
-                    **key,
-                    "x_shifts": caiman_dataset.motion_correction["shifts_rig"][:, 0],
-                    "y_shifts": caiman_dataset.motion_correction["shifts_rig"][:, 1],
-                    "z_shifts": (
-                        caiman_dataset.motion_correction["shifts_rig"][:, 2]
-                        if is3D
-                        else np.full_like(
-                            caiman_dataset.motion_correction["shifts_rig"][:, 0],
-                            0,
-                        )
-                    ),
-                    "x_std": np.nanstd(
-                        caiman_dataset.motion_correction["shifts_rig"][:, 0]
-                    ),
-                    "y_std": np.nanstd(
-                        caiman_dataset.motion_correction["shifts_rig"][:, 1]
-                    ),
-                    "z_std": (
-                        np.nanstd(caiman_dataset.motion_correction["shifts_rig"][:, 2])
-                        if is3D
-                        else np.nan
-                    ),
-                    "outlier_frames": None,
-                }
-
-                self.RigidMotionCorrection.insert1(rigid_correction)
-            else:
+            if caiman_dataset.is_pw_rigid:
                 # -- non-rigid motion correction --
-                nonrigid_correction = {
-                    **key,
-                    "block_height": (
-                        caiman_dataset.params.motion["strides"][0]
-                        + caiman_dataset.params.motion["overlaps"][0]
-                    ),
-                    "block_width": (
-                        caiman_dataset.params.motion["strides"][1]
-                        + caiman_dataset.params.motion["overlaps"][1]
-                    ),
-                    "block_depth": (
-                        caiman_dataset.params.motion["strides"][2]
-                        + caiman_dataset.params.motion["overlaps"][2]
-                        if is3D
-                        else 1
-                    ),
-                    "block_count_x": len(
-                        set(caiman_dataset.motion_correction["coord_shifts_els"][:, 0])
-                    ),
-                    "block_count_y": len(
-                        set(caiman_dataset.motion_correction["coord_shifts_els"][:, 2])
-                    ),
-                    "block_count_z": (
-                        len(
-                            set(
-                                caiman_dataset.motion_correction["coord_shifts_els"][
-                                    :, 4
-                                ]
-                            )
-                        )
-                        if is3D
-                        else 1
-                    ),
-                    "outlier_frames": None,
-                }
-
-                nonrigid_blocks = []
-                for b_id in range(
-                    len(caiman_dataset.motion_correction["x_shifts_els"][0, :])
-                ):
-                    nonrigid_blocks.append(
-                        {
-                            **key,
-                            "block_id": b_id,
-                            "block_x": np.arange(
-                                *caiman_dataset.motion_correction["coord_shifts_els"][
-                                    b_id, 0:2
-                                ]
-                            ),
-                            "block_y": np.arange(
-                                *caiman_dataset.motion_correction["coord_shifts_els"][
-                                    b_id, 2:4
-                                ]
-                            ),
-                            "block_z": (
-                                np.arange(
-                                    *caiman_dataset.motion_correction[
-                                        "coord_shifts_els"
-                                    ][b_id, 4:6]
-                                )
-                                if is3D
-                                else np.full_like(
-                                    np.arange(
-                                        *caiman_dataset.motion_correction[
-                                            "coord_shifts_els"
-                                        ][b_id, 0:2]
-                                    ),
-                                    0,
-                                )
-                            ),
-                            "x_shifts": caiman_dataset.motion_correction[
-                                "x_shifts_els"
-                            ][:, b_id],
-                            "y_shifts": caiman_dataset.motion_correction[
-                                "y_shifts_els"
-                            ][:, b_id],
-                            "z_shifts": (
-                                caiman_dataset.motion_correction["z_shifts_els"][
-                                    :, b_id
-                                ]
-                                if is3D
-                                else np.full_like(
-                                    caiman_dataset.motion_correction["x_shifts_els"][
-                                        :, b_id
-                                    ],
-                                    0,
-                                )
-                            ),
-                            "x_std": np.nanstd(
-                                caiman_dataset.motion_correction["x_shifts_els"][
-                                    :, b_id
-                                ]
-                            ),
-                            "y_std": np.nanstd(
-                                caiman_dataset.motion_correction["y_shifts_els"][
-                                    :, b_id
-                                ]
-                            ),
-                            "z_std": (
-                                np.nanstd(
-                                    caiman_dataset.motion_correction["z_shifts_els"][
-                                        :, b_id
-                                    ]
-                                )
-                                if is3D
-                                else np.nan
-                            ),
-                        }
-                    )
-
+                (
+                    nonrigid_correction,
+                    nonrigid_blocks,
+                ) = caiman_dataset.extract_pw_rigid_mc()
+                nonrigid_correction.update(**key)
+                nonrigid_blocks.update(**key)
                 self.NonRigidMotionCorrection.insert1(nonrigid_correction)
                 self.Block.insert(nonrigid_blocks)
+            else:
+                # -- rigid motion correction --
+                rigid_correction = caiman_dataset.extract_rigid_mc()
+                rigid_correction.update(**key)
+                self.RigidMotionCorrection.insert1(rigid_correction)
 
             # -- summary images --
             summary_images = [
@@ -966,40 +917,10 @@ class MotionCorrection(dj.Imported):
                 }
                 for fkey, ref_image, ave_img, corr_img, max_img in zip(
                     field_keys,
-                    (
-                        caiman_dataset.motion_correction["reference_image"].transpose(
-                            2, 0, 1
-                        )
-                        if is3D
-                        else caiman_dataset.motion_correction["reference_image"][...][
-                            np.newaxis, ...
-                        ]
-                    ),
-                    (
-                        caiman_dataset.motion_correction["average_image"].transpose(
-                            2, 0, 1
-                        )
-                        if is3D
-                        else caiman_dataset.motion_correction["average_image"][...][
-                            np.newaxis, ...
-                        ]
-                    ),
-                    (
-                        caiman_dataset.motion_correction["correlation_image"].transpose(
-                            2, 0, 1
-                        )
-                        if is3D
-                        else caiman_dataset.motion_correction["correlation_image"][...][
-                            np.newaxis, ...
-                        ]
-                    ),
-                    (
-                        caiman_dataset.motion_correction["max_image"].transpose(2, 0, 1)
-                        if is3D
-                        else caiman_dataset.motion_correction["max_image"][...][
-                            np.newaxis, ...
-                        ]
-                    ),
+                    caiman_dataset.ref_image.transpose(2, 0, 1),
+                    caiman_dataset.mean_image.transpose(2, 0, 1),
+                    caiman_dataset.correlation_map.transpose(2, 0, 1),
+                    caiman_dataset.max_proj_image.transpose(2, 0, 1),
                 )
             ]
             self.Summary.insert(summary_images)
@@ -1139,16 +1060,15 @@ class Segmentation(dj.Computed):
                         "mask_weights": mask["mask_weights"],
                     }
                 )
-                if caiman_dataset.cnmf.estimates.idx_components is not None:
-                    if mask["mask_id"] in caiman_dataset.cnmf.estimates.idx_components:
-                        cells.append(
-                            {
-                                **key,
-                                "mask_classification_method": "caiman_default_classifier",
-                                "mask": mask["mask_id"],
-                                "mask_type": "soma",
-                            }
-                        )
+                if mask["accepted"]:
+                    cells.append(
+                        {
+                            **key,
+                            "mask_classification_method": "caiman_default_classifier",
+                            "mask": mask["mask_id"],
+                            "mask_type": "soma",
+                        }
+                    )
 
             self.insert1(key)
             self.Mask.insert(masks, ignore_extra_fields=True)
@@ -1601,6 +1521,7 @@ class ProcessingQualityMetrics(dj.Computed):
 _table_attribute_mapper = {
     "ProcessingTask": "processing_output_dir",
     "Curation": "curation_output_dir",
+    "PerPlaneProcessingTask": "processing_output_dir",
 }
 
 

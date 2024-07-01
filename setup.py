@@ -39,7 +39,7 @@ setup(
         "ipykernel>=6.0.1",
         "ipywidgets",
         "plotly",
-        "element-interface @ git+https://github.com/datajoint/element-interface.git",
+        "element-interface @ git+https://github.com/datajoint/element-interface.git@staging",
     ],
     extras_require={
         "caiman_requirements": [caiman_requirements],
@@ -54,7 +54,9 @@ setup(
         "nd2": ["nd2"],
         "sbxreader": ["sbxreader @ git+https://github.com/jcouto/sbxreader.git"],
         "scanreader": ["scanreader @ git+https://github.com/atlab/scanreader.git"],
-        "suite2p": ["suite2p[io]>=0.12.1"],
+        "suite2p": [
+            "suite2p[io] @ git+https://github.com/datajoint/suite2p.git@mesoscan"
+        ],
         "tests": ["pytest", "pytest-cov", "shutils"],
     },
 )
