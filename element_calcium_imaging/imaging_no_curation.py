@@ -475,7 +475,6 @@ class Processing(dj.Computed):
 
                 channel = caiman_params.get("channel_to_process", 0)
 
-
                 if ndepths == 1:  # single-plane processing
                     if acq_software == "ScanImage":
                         if nchannels > 1:
@@ -522,12 +521,9 @@ class Processing(dj.Computed):
                                 caiman_compatible=True,
                             )
                         ]
-                        rho = local_correlations(
-                            tifffile.imread(image_files)
-                        )
+                        rho = local_correlations(tifffile.imread(image_files))
                         half_median_correlation = np.median(rho) / 2
                         caiman_params["min_corr"] = half_median_correlation
-
 
                     run_caiman(
                         file_paths=[f.as_posix() for f in image_files],
