@@ -326,6 +326,8 @@ class FieldMotionCorrection(dj.Computed):
             _, dview, n_processes = cm.cluster.setup_cluster(
                 backend="multiprocessing", n_processes=None
             )
+            n_processes = int(np.floor(n_processes * 0.8))  # use 80% of available cores
+
             caiman_temp = os.environ.get("CAIMAN_TEMP")
             os.environ["CAIMAN_TEMP"] = str(output_dir)
             try:
@@ -456,6 +458,7 @@ class FieldSegmentation(dj.Computed):
             _, dview, n_processes = cm.cluster.setup_cluster(
                 backend="multiprocessing", n_processes=None
             )
+            n_processes = int(np.floor(n_processes * 0.8))  # use 80% of available cores
             cnm = load_CNMF(cnmf_mc_output_file, n_processes=n_processes, dview=dview)
             cnm.params.set("data", {"fnames": fnames})
             caiman_temp = os.environ.get("CAIMAN_TEMP")
