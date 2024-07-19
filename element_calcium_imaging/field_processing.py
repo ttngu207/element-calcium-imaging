@@ -42,14 +42,14 @@ def activate(
         create_tables=create_tables,
         add_objects=imaging.__dict__,
     )
-    imaging.Processing.key_source -= Preprocessing.key_source.proj()
+    imaging.Processing.key_source -= PreProcessing.key_source.proj()
 
 
 # ---------------- Multi-field Processing (per-field basis) ----------------
 
 
 @schema
-class Preprocessing(dj.Computed):
+class PreProcessing(dj.Computed):
     definition = """
     -> imaging.ProcessingTask
     ---
@@ -254,7 +254,7 @@ class Preprocessing(dj.Computed):
 @schema
 class FieldMotionCorrection(dj.Computed):
     definition = """
-    -> Preprocessing.Field
+    -> PreProcessing.Field
     ---
     execution_time: datetime   # datetime of the start of this step
     execution_duration: float  # (hour) execution duration
@@ -265,7 +265,7 @@ class FieldMotionCorrection(dj.Computed):
         execution_time = datetime.utcnow()
         processed_root_data_dir = scan.get_processed_root_data_dir()
 
-        output_dir, params = (Preprocessing.Field & key).fetch1(
+        output_dir, params = (PreProcessing.Field & key).fetch1(
             "processing_output_dir", "params"
         )
         extra_params = params.pop("extra_dj_params", {})
@@ -424,7 +424,7 @@ class FieldSegmentation(dj.Computed):
         processed_root_data_dir = scan.get_processed_root_data_dir()
 
         output_dir, params = (
-            Preprocessing.Field.proj("processing_output_dir")
+            PreProcessing.Field.proj("processing_output_dir")
             * FieldMotionCorrection.proj("mc_params")
             & key
         ).fetch1("processing_output_dir", "mc_params")
@@ -531,7 +531,7 @@ class FieldSegmentation(dj.Computed):
 @schema
 class PostProcessing(dj.Computed):
     definition = """
-    -> Preprocessing
+    -> PreProcessing
     ---
     execution_time: datetime   # datetime of the start of this step
     execution_duration: float  # (hour) execution duration
@@ -540,22 +540,22 @@ class PostProcessing(dj.Computed):
     @property
     def key_source(self):
         """
-        Find FieldPreprocessing entries that have finished processing for all fields
+        Find PreProcessing entries that have finished processing for all fields
         """
         per_plane_proc = (
-            Preprocessing.aggr(
-                Preprocessing.Field.proj(),
+            PreProcessing.aggr(
+                PreProcessing.Field.proj(),
                 field_count="count(field_idx)",
                 keep_all_rows=True,
             )
-            * Preprocessing.aggr(
+            * PreProcessing.aggr(
                 FieldSegmentation.proj(),
                 finished_field_count="count(field_idx)",
                 keep_all_rows=True,
             )
             & "field_count = finished_field_count"
         )
-        return Preprocessing & per_plane_proc
+        return PreProcessing & per_plane_proc
 
     def make(self, key):
         execution_time = datetime.utcnow()
