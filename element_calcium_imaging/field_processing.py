@@ -10,6 +10,7 @@ import os
 import datajoint as dj
 import numpy as np
 from element_interface.utils import dict_to_uuid, find_full_path, find_root_directory
+from element_interface.utils import memoized_result
 
 from . import scan
 
@@ -134,14 +135,13 @@ class PreProcessing(dj.Computed):
                 prepared_input_dir = output_dir.parent / "prepared_input"
                 prepared_input_dir.mkdir(exist_ok=True)
 
-                image_files = [
-                    PVmeta.write_single_bigtiff(
-                        plane_idx=plane_idx,
-                        channel=channel,
-                        output_dir=prepared_input_dir,
-                        caiman_compatible=True,
-                    )
-                ]
+                image_files = PVmeta.write_single_bigtiff(
+                    plane_idx=plane_idx,
+                    channel=channel,
+                    output_dir=prepared_input_dir,
+                    caiman_compatible=True,
+                    gb_per_file=4,
+                )
 
                 field_processing_tasks.append(
                     {
@@ -159,78 +159,6 @@ class PreProcessing(dj.Computed):
                             },
                         },
                         "processing_output_dir": pln_output_dir.relative_to(
-                            processed_root_data_dir
-                        ).as_posix(),
-                    }
-                )
-        elif method == "suite2p" and acq_software == "ScanImage" and nrois > 0:
-            import scanreader
-            from suite2p import default_ops, io
-
-            image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
-            image_files = [
-                find_full_path(scan.get_imaging_root_data_dir(), image_file).as_posix()
-                for image_file in image_files
-            ]
-
-            scan_ = scanreader.read_scan(image_files)
-
-            ops = {**default_ops(), **params}
-
-            ops["save_path0"] = output_dir.as_posix()
-            ops["save_folder"] = "suite2p"
-            ops["fs"] = sampling_rate
-            ops["nplanes"] = ndepths
-            ops["nchannels"] = nchannels
-            ops["input_format"] = pathlib.Path(image_files[0]).suffix[1:]
-            ops["data_path"] = [pathlib.Path(image_files[0]).parent.as_posix()]
-            ops["tiff_list"] = [f for f in image_files]
-            ops["force_sktiff"] = False
-
-            ops.update(
-                {
-                    "mesoscan": True,
-                    "input_format": "mesoscan",
-                    "nrois": nfields,
-                    "dx": [],  # x-offset for each field
-                    "dy": [],  # y-offset for each field
-                    "slices": [],  # plane index for each field
-                    "lines": [],  # row indices for each field
-                }
-            )
-            for field_idx, field_info in enumerate(scan_.fields):
-                ops["dx"].append(field_info.xslices[0].start)
-                ops["dy"].append(field_info.yslices[0].start)
-                ops["slices"].append(field_info.slice_id)
-                ops["lines"].append(
-                    np.arange(field_info.yslices[0].start, field_info.yslices[0].stop)
-                )
-
-            # generate binary files for each field
-            save_folder = output_dir / ops["save_folder"]
-            save_folder.mkdir(exist_ok=True)
-            _ = io.mesoscan_to_binary(ops.copy())
-
-            ops_paths = [f for f in save_folder.rglob("plane*/ops.npy")]
-            assert len(ops_paths) == nfields
-
-            field_processing_tasks = []
-            for ops_path in ops_paths:
-                ops = np.load(ops_path, allow_pickle=True).item()
-                ops["extra_dj_params"] = {
-                    "ops_path": ops_path.relative_to(
-                        processed_root_data_dir
-                    ).as_posix(),
-                    "field_idx": int(
-                        re.search(r"plane(\d+)", ops_path.parent.name).group(1)
-                    ),
-                }
-                field_processing_tasks.append(
-                    {
-                        **key,
-                        "field_idx": ops["extra_dj_params"]["field_idx"],
-                        "params": ops,
-                        "processing_output_dir": ops_path.parent.relative_to(
                             processed_root_data_dir
                         ).as_posix(),
                     }
@@ -278,6 +206,7 @@ class FieldMotionCorrection(dj.Computed):
         sampling_rate = (scan.ScanInfo & key).fetch1("fps")
 
         if acq_software == "PrairieView" and method == "caiman":
+            import multiprocessing
             import tifffile
             from element_interface.run_caiman import _save_mc
             import caiman as cm
@@ -322,58 +251,82 @@ class FieldMotionCorrection(dj.Computed):
                     "indices": mc_indices,
                 }
 
-            opts = CNMFParams(params_dict=params)
-            _, dview, n_processes = cm.cluster.setup_cluster(
-                backend="multiprocessing", n_processes=None
+            output_dir = output_dir / "motion_correction"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            @memoized_result(
+                uniqueness_dict=params,
+                output_directory=output_dir,
             )
-            n_processes = int(np.floor(n_processes * 0.8))  # use 80% of available cores
+            def _run_motion_correction():
+                caiman_temp = os.environ.get("CAIMAN_TEMP")
+                os.environ["CAIMAN_TEMP"] = str(output_dir)
 
-            caiman_temp = os.environ.get("CAIMAN_TEMP")
-            os.environ["CAIMAN_TEMP"] = str(output_dir)
-            try:
-                cnm = CNMF(n_processes, params=opts, dview=dview)
-                fnames = cnm.params.get("data", "fnames")
-                logger.info("Starting motion correction (CaImAn)...")
-                mc = MotionCorrect(fnames, dview=cnm.dview, **cnm.params.motion)
-                mc.motion_correct(save_movie=True)
-
-                fname_mc = (
-                    mc.fname_tot_els
-                    if cnm.params.motion["pw_rigid"]
-                    else mc.fname_tot_rig
+                # use 80% of available cores
+                n_processes = int(np.floor(multiprocessing.cpu_count() * 0.8))
+                _, dview, n_processes = cm.cluster.setup_cluster(
+                    backend="multiprocessing", n_processes=n_processes
                 )
-                if cnm.params.get("motion", "pw_rigid"):
-                    b0 = np.ceil(
-                        np.maximum(
-                            np.max(np.abs(mc.x_shifts_els)),
-                            np.max(np.abs(mc.y_shifts_els)),
-                        )
-                    ).astype(int)
-                    if cnm.params.get("motion", "is3D"):
-                        cnm.estimates.shifts = [
-                            mc.x_shifts_els,
-                            mc.y_shifts_els,
-                            mc.z_shifts_els,
-                        ]
+                try:
+                    opts = CNMFParams(params_dict=params)
+                    cnm = CNMF(n_processes, params=opts, dview=dview)
+                    fnames = cnm.params.get("data", "fnames")
+                    logger.info("Starting motion correction (CaImAn)...")
+                    mc = MotionCorrect(fnames, dview=cnm.dview, **cnm.params.motion)
+                    mc.motion_correct(save_movie=True)
+
+                    fname_mc = (
+                        mc.fname_tot_els
+                        if cnm.params.motion["pw_rigid"]
+                        else mc.fname_tot_rig
+                    )
+                    if cnm.params.get("motion", "pw_rigid"):
+                        b0 = np.ceil(
+                            np.maximum(
+                                np.max(np.abs(mc.x_shifts_els)),
+                                np.max(np.abs(mc.y_shifts_els)),
+                            )
+                        ).astype(int)
+                        if cnm.params.get("motion", "is3D"):
+                            cnm.estimates.shifts = [
+                                mc.x_shifts_els,
+                                mc.y_shifts_els,
+                                mc.z_shifts_els,
+                            ]
+                        else:
+                            cnm.estimates.shifts = [mc.x_shifts_els, mc.y_shifts_els]
                     else:
-                        cnm.estimates.shifts = [mc.x_shifts_els, mc.y_shifts_els]
+                        b0 = np.ceil(np.max(np.abs(mc.shifts_rig))).astype(int)
+                        cnm.estimates.shifts = mc.shifts_rig
+                except Exception as e:
+                    dview.terminate()
+                    raise e
                 else:
-                    b0 = np.ceil(np.max(np.abs(mc.shifts_rig))).astype(int)
-                    cnm.estimates.shifts = mc.shifts_rig
-            except Exception as e:
-                dview.terminate()
-                raise e
-            else:
-                cm.stop_server(dview=dview)
-                logger.info("Motion correction (CaImAn) complete. Saving results.")
-                cnmf_mc_output_file = output_dir / (
-                    pathlib.Path(fname_mc[0]).stem + "_mc.hdf5"
-                )
-                cnm.save(cnmf_mc_output_file.as_posix())
-                _save_mc(mc, cnmf_mc_output_file.as_posix(), params["is3D"])
-
-                params["extra_dj_params"] = {
+                    cm.stop_server(dview=dview)
+                    logger.info("Motion correction (CaImAn) complete. Saving results.")
+                    cnmf_mc_output_file = output_dir / (
+                        pathlib.Path(fname_mc[0]).stem + "_cnm_mc.hdf5"
+                    )
+                    cnm.save(cnmf_mc_output_file.as_posix())
+                    logger.info("Saving motion correction hdf5.")
+                    mc_output_file = output_dir / (
+                        pathlib.Path(fname_mc[0]).stem + "_mc.hdf5"
+                    )
+                    _save_mc(
+                        mc,
+                        mc_output_file.as_posix(),
+                        params["is3D"],
+                        summary_images={},  # skip summary images here
+                    )
+                    if caiman_temp is not None:
+                        os.environ["CAIMAN_TEMP"] = caiman_temp
+                    else:
+                        del os.environ["CAIMAN_TEMP"]
+                extra_dj_params = {
                     "cnmf_mc_output_file": cnmf_mc_output_file.relative_to(
+                        processed_root_data_dir
+                    ).as_posix(),
+                    "mc_output_file": mc_output_file.relative_to(
                         processed_root_data_dir
                     ).as_posix(),
                     "fname_mc": [
@@ -382,20 +335,14 @@ class FieldMotionCorrection(dj.Computed):
                     ],
                     "b0": b0,
                 }
-                params["fnames"] = [
-                    f.relative_to(processed_root_data_dir).as_posix()
-                    for f in file_paths
-                ]
+                return extra_dj_params
 
-                if caiman_temp is not None:
-                    os.environ["CAIMAN_TEMP"] = caiman_temp
-                else:
-                    del os.environ["CAIMAN_TEMP"]
-        elif acq_software == "ScanImage" and method == "suite2p":
-            from suite2p.run_s2p import run_plane
+            extra_dj_params = _run_motion_correction()
+            params["fnames"] = [
+                f.relative_to(processed_root_data_dir).as_posix() for f in file_paths
+            ]
+            params["extra_dj_params"] = extra_dj_params
 
-            ops_path = find_full_path(processed_root_data_dir, extra_params["ops_path"])
-            run_plane(params, ops_path=ops_path)
         else:
             raise NotImplementedError(
                 f"Field motion correction for {acq_software} scans with {method} is not yet supported in this table."
@@ -439,12 +386,16 @@ class FieldSegmentation(dj.Computed):
         )
 
         if acq_software == "PrairieView" and method == "caiman":
+            import multiprocessing
             import h5py
             import caiman as cm
             from caiman.source_extraction.cnmf.cnmf import load_CNMF
 
             cnmf_mc_output_file = find_full_path(
                 processed_root_data_dir, extra_params["cnmf_mc_output_file"]
+            )
+            mc_output_file = find_full_path(
+                processed_root_data_dir, extra_params["mc_output_file"]
             )
             fname_mc = [
                 str(find_full_path(processed_root_data_dir, f))
@@ -455,67 +406,101 @@ class FieldSegmentation(dj.Computed):
                 for f in params["fnames"]
             ]
 
-            _, dview, n_processes = cm.cluster.setup_cluster(
-                backend="multiprocessing", n_processes=None
+            output_dir = output_dir / "segmentation"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            @memoized_result(
+                uniqueness_dict={**params, **extra_params},
+                output_directory=output_dir,
             )
-            n_processes = int(np.floor(n_processes * 0.8))  # use 80% of available cores
-            cnm = load_CNMF(cnmf_mc_output_file, n_processes=n_processes, dview=dview)
-            cnm.params.set("data", {"fnames": fnames})
-            caiman_temp = os.environ.get("CAIMAN_TEMP")
-            os.environ["CAIMAN_TEMP"] = str(output_dir)
-            try:
-                b0 = 0
-                base_name = pathlib.Path(fnames[0]).stem + "_memmap_"
-                data_set_name = cnm.params.get("data", "var_name_hdf5")
-
-                logger.info("Generating C-order memmap file...")
-                fname_new = cm.mmapping.save_memmap(
-                    fname_mc,
-                    base_name=base_name,
-                    order="C",
-                    var_name_hdf5=data_set_name,
-                    border_to_0=b0,
+            def _run_segmentation():
+                # use 80% of available cores
+                n_processes = int(np.floor(multiprocessing.cpu_count() * 0.8))
+                _, dview, n_processes = cm.cluster.setup_cluster(
+                    backend="multiprocessing", n_processes=n_processes
                 )
-                Yr, dims, T = cm.mmapping.load_memmap(fname_new)
-                images = np.reshape(Yr.T, [T] + list(dims), order="F")
-                cnm.mmap_file = fname_new
 
-                logger.info("Starting CNMF analysis...")
-                indices = (slice(None), slice(None))
-                fit_cnm = cnm.fit(images, indices=indices)
-                Cn = cm.summary_images.local_correlations(
-                    images[:: max(T // 1000, 1)], swap_dim=False
+                cnm = load_CNMF(
+                    cnmf_mc_output_file, n_processes=n_processes, dview=dview
                 )
-                Cn[np.isnan(Cn)] = 0
-                fname_init_hdf5 = fname_new[:-5] + "_init.hdf5"
-                fit_cnm.save(fname_init_hdf5)
-                # fit_cnm.params.change_params({'p': self.params.get('preprocess', 'p')})
-                # RE-RUN seeded CNMF on accepted patches to refine and perform deconvolution
-                cnm2 = fit_cnm.refit(images, dview=cnm.dview)
-                cnm2.estimates.evaluate_components(images, cnm2.params, dview=cnm.dview)
+                cnm.params.set("data", {"fnames": fnames})
 
-                cnm2.estimates.detrend_df_f(quantileMin=8, frames_window=250)
-                cnm2.estimates.Cn = Cn
-                fname_hdf5 = cnm2.mmap_file[:-4] + "hdf5"
-                cnm2.save(fname_hdf5)
+                caiman_temp = os.environ.get("CAIMAN_TEMP")
+                os.environ["CAIMAN_TEMP"] = str(output_dir)
+                try:
+                    b0 = 0
+                    base_name = pathlib.Path(fnames[0]).stem + "_memmap_"
+                    data_set_name = cnm.params.get("data", "var_name_hdf5")
 
-            except Exception as e:
-                dview.terminate()
-                raise e
-            else:
-                cm.stop_server(dview=dview)
-                logger.info("CNMF analysis complete. Saving results.")
-                cnmf_output_file = pathlib.Path(fname_hdf5)
+                    logger.info("Generating C-order memmap file...")
+                    fname_new = cm.mmapping.save_memmap(
+                        fname_mc,
+                        base_name=base_name,
+                        order="C",
+                        var_name_hdf5=data_set_name,
+                        border_to_0=b0,
+                    )
+                    Yr, dims, T = cm.mmapping.load_memmap(fname_new)
+                    images = np.reshape(Yr.T, [T] + list(dims), order="F")
+                    cnm.mmap_file = fname_new
 
-                # open cnmf_mc_output_file, copy the "/motion_correction" stuff over to cnmf_output_file
-                with h5py.File(cnmf_mc_output_file, "r") as h5mc:
-                    with h5py.File(cnmf_output_file, "r+") as h5f:
-                        h5mc.copy("/motion_correction", h5f)
+                    logger.info("Starting CNMF analysis...")
+                    indices = (slice(None), slice(None))
+                    fit_cnm = cnm.fit(images, indices=indices)
 
-                if caiman_temp is not None:
-                    os.environ["CAIMAN_TEMP"] = caiman_temp
+                    Cn = cm.summary_images.local_correlations(
+                        images[:: max(T // 100, 1)], swap_dim=False
+                    )
+                    Cn[np.isnan(Cn)] = 0
+                    fname_init_hdf5 = fname_new[:-5] + "_init.hdf5"
+                    fit_cnm.save(fname_init_hdf5)
+                    # fit_cnm.params.change_params({'p': self.params.get('preprocess', 'p')})
+                    # RE-RUN seeded CNMF on accepted patches to refine and perform deconvolution
+                    cnm2 = fit_cnm.refit(images, dview=cnm.dview)
+                    cnm2.estimates.evaluate_components(
+                        images, cnm2.params, dview=cnm.dview
+                    )
+
+                    cnm2.estimates.detrend_df_f(quantileMin=8, frames_window=250)
+                    cnm2.estimates.Cn = Cn
+                    fname_hdf5 = cnm2.mmap_file[:-4] + "hdf5"
+                    cnm2.save(fname_hdf5)
+
+                except Exception as e:
+                    dview.terminate()
+                    raise e
                 else:
-                    del os.environ["CAIMAN_TEMP"]
+                    cm.stop_server(dview=dview)
+                    logger.info("CNMF analysis complete. Saving results.")
+                    cnmf_output_file = pathlib.Path(fname_hdf5)
+
+                    logger.info("Compute summary images...")
+                    summary_images = {
+                        "average_image": np.mean(images[:: max(T // 100, 1)], axis=0),
+                        "max_image": np.max(images[:: max(T // 100, 1)], axis=0),
+                        "correlation_image": Cn,
+                    }
+                    # open mc_output_file, copy the "/motion_correction" over to cnmf_output_file
+                    logger.info("Copy '/motion_correction' to output file...")
+                    with h5py.File(mc_output_file, "r") as h5mc:
+                        with h5py.File(cnmf_output_file, "r+") as h5f:
+                            h5mc.copy("/motion_correction", h5f)
+                            h5g = h5f.get("/motion_correction")
+                            for img_type, img in summary_images.items():
+                                if img_type not in h5g:
+                                    h5g.require_dataset(
+                                        img_type,
+                                        shape=np.shape(img),
+                                        data=img,
+                                        dtype=img.dtype,
+                                    )
+
+                    if caiman_temp is not None:
+                        os.environ["CAIMAN_TEMP"] = caiman_temp
+                    else:
+                        del os.environ["CAIMAN_TEMP"]
+
+            _run_segmentation()
         else:
             raise NotImplementedError(
                 f"Field Segmentation for {acq_software} scans with {method} is not yet supported in this table."
@@ -565,14 +550,6 @@ class PostProcessing(dj.Computed):
         method, params = (
             imaging.ProcessingTask * imaging.ProcessingParamSet & key
         ).fetch1("processing_method", "params")
-
-        if method == "suite2p" and params.get("combined", True):
-            from suite2p import io
-
-            output_dir = (imaging.ProcessingTask & key).fetch1("processing_output_dir")
-            output_dir = find_full_path(scan.get_imaging_root_data_dir(), output_dir)
-
-            io.combined(output_dir / "suite2p", save=True)
 
         exec_dur = (datetime.utcnow() - execution_time).total_seconds() / 3600
         self.insert1(
