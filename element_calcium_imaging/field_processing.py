@@ -126,43 +126,54 @@ class PreProcessing(dj.Computed):
                 if PVmeta.meta["num_channels"] > 1
                 else PVmeta.meta["channels"][0]
             )
+            prepared_input_dir = output_dir.parent / "prepared_input"
+            prepared_input_dir.mkdir(exist_ok=True)
 
-            field_processing_tasks = []
-            for field_idx, plane_idx in zip(field_ind, PVmeta.meta["plane_indices"]):
-                pln_output_dir = output_dir / f"pln{plane_idx}_chn{channel}"
-                pln_output_dir.mkdir(parents=True, exist_ok=True)
+            @memoized_result(
+                uniqueness_dict=params,
+                output_directory=prepared_input_dir,
+            )
+            def _run_write_bigtiff():
+                _field_processing_tasks = []
+                for field_idx, plane_idx in zip(
+                    field_ind, PVmeta.meta["plane_indices"]
+                ):
+                    pln_output_dir = output_dir / f"pln{plane_idx}_chn{channel}"
+                    pln_output_dir.mkdir(parents=True, exist_ok=True)
 
-                prepared_input_dir = output_dir.parent / "prepared_input"
-                prepared_input_dir.mkdir(exist_ok=True)
+                    image_files = PVmeta.write_single_bigtiff(
+                        plane_idx=plane_idx,
+                        channel=channel,
+                        output_dir=prepared_input_dir,
+                        caiman_compatible=True,
+                        gb_per_file=4,
+                    )
 
-                image_files = PVmeta.write_single_bigtiff(
-                    plane_idx=plane_idx,
-                    channel=channel,
-                    output_dir=prepared_input_dir,
-                    caiman_compatible=True,
-                    gb_per_file=4,
-                )
-
-                field_processing_tasks.append(
-                    {
-                        **key,
-                        "field_idx": field_idx,
-                        "params": {
-                            **params,
-                            "extra_dj_params": {
-                                "channel": channel,
-                                "plane_idx": plane_idx,
-                                "image_files": [
-                                    f.relative_to(processed_root_data_dir).as_posix()
-                                    for f in image_files
-                                ],
+                    _field_processing_tasks.append(
+                        {
+                            **key,
+                            "field_idx": field_idx,
+                            "params": {
+                                **params,
+                                "extra_dj_params": {
+                                    "channel": channel,
+                                    "plane_idx": plane_idx,
+                                    "image_files": [
+                                        f.relative_to(
+                                            processed_root_data_dir
+                                        ).as_posix()
+                                        for f in image_files
+                                    ],
+                                },
                             },
-                        },
-                        "processing_output_dir": pln_output_dir.relative_to(
-                            processed_root_data_dir
-                        ).as_posix(),
-                    }
-                )
+                            "processing_output_dir": pln_output_dir.relative_to(
+                                processed_root_data_dir
+                            ).as_posix(),
+                        }
+                    )
+                return _field_processing_tasks
+
+            field_processing_tasks = _run_write_bigtiff()
         else:
             raise NotImplementedError(
                 f"Field processing for {acq_software} scans with {method} is not yet supported in this table."
