@@ -146,6 +146,7 @@ class PreProcessing(dj.Computed):
                         channel=channel,
                         output_dir=prepared_input_dir,
                         caiman_compatible=True,
+                        overwrite=True,
                         gb_per_file=4,
                     )
 
