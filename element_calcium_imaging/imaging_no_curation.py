@@ -359,6 +359,8 @@ class ZDriftMetrics(dj.Computed):
     """
 
     def make(self, key):
+        import nd2
+
         def _make_taper(size, width):
             m = np.ones(size - width + 1)
             k = np.hanning(width)
@@ -372,11 +374,19 @@ class ZDriftMetrics(dj.Computed):
             for image_file in image_files
         ]
 
+        try:
+            movie_file = next(
+                file for file in image_files if not file.name.endswith("_Z.nd2")
+            )
+        except StopIteration:
+            raise FileNotFoundError(
+                f"No calcium imaging movie file found in {image_files}"
+            )
+
         zstack_files = get_zstack_files(key)
+        assert len(zstack_files) == 1, f"Multiple zstacks files found at {zstack_files}. Expected only one."
 
-        import nd2
-
-        ca_imaging_movie = nd2.imread(image_files[0])
+        ca_imaging_movie = nd2.imread(movie_file)
         zstack = nd2.imread(zstack_files[0])
 
         if not all(
