@@ -384,7 +384,7 @@ class ZDriftMetrics(dj.Computed):
             )
 
         zstack_files = get_zstack_files(key)
-        assert len(zstack_files) == 1, f"Multiple zstacks files found at {zstack_files}. Expected only one."
+        assert len(zstack_files) == 1, f"Multiple zstack files found at {zstack_files}. Expected only one."
 
         ca_imaging_movie = nd2.imread(movie_file)
         zstack = nd2.imread(zstack_files[0])
