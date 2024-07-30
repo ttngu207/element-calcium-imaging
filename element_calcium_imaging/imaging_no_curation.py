@@ -547,7 +547,7 @@ class Processing(dj.Computed):
                 raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 files_to_link = [
                     find_full_path(get_imaging_root_data_dir(), raw_image_file)
-                    for raw_image_file in raw_image_files
+                    for raw_image_file in raw_image_files if not raw_image_file.endswith("_Z.nd2")
                 ]
                 image_files = []
                 for file in files_to_link:
@@ -561,7 +561,7 @@ class Processing(dj.Computed):
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 image_files = [
                     find_full_path(get_imaging_root_data_dir(), image_file)
-                    for image_file in image_files
+                    for image_file in image_files if not image_file.endswith("_Z.nd2")
                 ]
 
             method = (ProcessingParamSet * ProcessingTask & key).fetch1(
