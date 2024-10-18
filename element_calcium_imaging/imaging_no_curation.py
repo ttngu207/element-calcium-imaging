@@ -384,7 +384,9 @@ class ZDriftMetrics(dj.Computed):
             )
 
         zstack_files = get_zstack_files(key)
-        assert len(zstack_files) == 1, f"Multiple zstack files found at {zstack_files}. Expected only one."
+        assert (
+            len(zstack_files) == 1
+        ), f"Multiple zstack files found at {zstack_files}. Expected only one."
 
         ca_imaging_movie = nd2.imread(movie_file)
         zstack = nd2.imread(zstack_files[0])
@@ -514,7 +516,18 @@ class Processing(dj.Computed):
             ProcessingTask.update1(
                 {**key, "processing_output_dir": output_dir.as_posix()}
             )
-        output_dir = find_full_path(get_imaging_root_data_dir(), output_dir).as_posix()
+
+        try:
+            output_dir = find_full_path(
+                get_imaging_root_data_dir(), output_dir
+            ).as_posix()
+        except FileNotFoundError as e:
+            if task_mode == "trigger":
+                processed_dir = pathlib.Path(get_processed_root_data_dir())
+                output_dir = processed_dir / output_dir
+                output_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                raise e
 
         if task_mode == "load":
             method, imaging_dataset = get_loader_result(key, ProcessingTask)
@@ -547,7 +560,8 @@ class Processing(dj.Computed):
                 raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 files_to_link = [
                     find_full_path(get_imaging_root_data_dir(), raw_image_file)
-                    for raw_image_file in raw_image_files if not raw_image_file.endswith("_Z.nd2")
+                    for raw_image_file in raw_image_files
+                    if not raw_image_file.endswith("_Z.nd2")
                 ]
                 image_files = []
                 for file in files_to_link:
@@ -561,7 +575,8 @@ class Processing(dj.Computed):
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 image_files = [
                     find_full_path(get_imaging_root_data_dir(), image_file)
-                    for image_file in image_files if not image_file.endswith("_Z.nd2")
+                    for image_file in image_files
+                    if not image_file.endswith("_Z.nd2")
                 ]
 
             method = (ProcessingParamSet * ProcessingTask & key).fetch1(
@@ -845,7 +860,7 @@ class MotionCorrection(dj.Imported):
                         f"Unable to load/ingest non-rigid motion correction for plane {plane}."
                         "Non-rigid motion correction data is not saved by Suite2p for versions above 0.10.*."
                     )
-                else: 
+                else:
                     # -- rigid motion correction --
                     if idx == 0:
                         rigid_correction = {
@@ -1122,30 +1137,40 @@ class MotionCorrection(dj.Imported):
                 }
                 for fkey, ref_image, ave_img, corr_img, max_img in zip(
                     field_keys,
-                    caiman_dataset.motion_correction["reference_image"].transpose(
-                        2, 0, 1
-                    )
-                    if is3D
-                    else caiman_dataset.motion_correction["reference_image"][...][
-                        np.newaxis, ...
-                    ],
-                    caiman_dataset.motion_correction["average_image"].transpose(2, 0, 1)
-                    if is3D
-                    else caiman_dataset.motion_correction["average_image"][...][
-                        np.newaxis, ...
-                    ],
-                    caiman_dataset.motion_correction["correlation_image"].transpose(
-                        2, 0, 1
-                    )
-                    if is3D
-                    else caiman_dataset.motion_correction["correlation_image"][...][
-                        np.newaxis, ...
-                    ],
-                    caiman_dataset.motion_correction["max_image"].transpose(2, 0, 1)
-                    if is3D
-                    else caiman_dataset.motion_correction["max_image"][...][
-                        np.newaxis, ...
-                    ],
+                    (
+                        caiman_dataset.motion_correction["reference_image"].transpose(
+                            2, 0, 1
+                        )
+                        if is3D
+                        else caiman_dataset.motion_correction["reference_image"][...][
+                            np.newaxis, ...
+                        ]
+                    ),
+                    (
+                        caiman_dataset.motion_correction["average_image"].transpose(
+                            2, 0, 1
+                        )
+                        if is3D
+                        else caiman_dataset.motion_correction["average_image"][...][
+                            np.newaxis, ...
+                        ]
+                    ),
+                    (
+                        caiman_dataset.motion_correction["correlation_image"].transpose(
+                            2, 0, 1
+                        )
+                        if is3D
+                        else caiman_dataset.motion_correction["correlation_image"][...][
+                            np.newaxis, ...
+                        ]
+                    ),
+                    (
+                        caiman_dataset.motion_correction["max_image"].transpose(2, 0, 1)
+                        if is3D
+                        else caiman_dataset.motion_correction["max_image"][...][
+                            np.newaxis, ...
+                        ]
+                    ),
                 )
             ]
             self.Summary.insert(summary_images)
