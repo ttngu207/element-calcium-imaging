@@ -18,6 +18,8 @@ from .scan import (
     get_zstack_files,
 )
 
+
+logger = dj.logger
 schema = dj.Schema()
 
 _linking_module = None
@@ -357,6 +359,8 @@ class ZDriftMetrics(dj.Computed):
     """
 
     def make(self, key):
+        import nd2
+
         def _make_taper(size, width):
             m = np.ones(size - width + 1)
             k = np.hanning(width)
@@ -370,11 +374,19 @@ class ZDriftMetrics(dj.Computed):
             for image_file in image_files
         ]
 
+        try:
+            movie_file = next(
+                file for file in image_files if not file.name.endswith("_Z.nd2")
+            )
+        except StopIteration:
+            raise FileNotFoundError(
+                f"No calcium imaging movie file found in {image_files}"
+            )
+
         zstack_files = get_zstack_files(key)
+        assert len(zstack_files) == 1, f"Multiple zstack files found at {zstack_files}. Expected only one."
 
-        import nd2
-
-        ca_imaging_movie = nd2.imread(image_files[0])
+        ca_imaging_movie = nd2.imread(movie_file)
         zstack = nd2.imread(zstack_files[0])
 
         if not all(
@@ -535,7 +547,7 @@ class Processing(dj.Computed):
                 raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 files_to_link = [
                     find_full_path(get_imaging_root_data_dir(), raw_image_file)
-                    for raw_image_file in raw_image_files
+                    for raw_image_file in raw_image_files if not raw_image_file.endswith("_Z.nd2")
                 ]
                 image_files = []
                 for file in files_to_link:
@@ -549,7 +561,7 @@ class Processing(dj.Computed):
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 image_files = [
                     find_full_path(get_imaging_root_data_dir(), image_file)
-                    for image_file in image_files
+                    for image_file in image_files if not image_file.endswith("_Z.nd2")
                 ]
 
             method = (ProcessingParamSet * ProcessingTask & key).fetch1(
